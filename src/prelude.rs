@@ -9,14 +9,11 @@ pub use crate::filter::FilterType;
 pub use crate::oscillator::Oscillator;
 pub use crate::patch::Patch;
 pub use crate::pattern::{arp, euclidean, seq, Pattern};
-pub use crate::score::{b, bar, Score, Tempo, Time};
+pub use crate::score::{b, bar, Tempo, Time};
 pub use crate::waveform::Waveform;
 
-// ── Effects (for direct use / old API) ──
-pub use crate::effects::{Chorus, Delay, DelayMode, Distortion, DistortionMode, Effect, StereoFrame};
-
-// ── Events ──
-pub use crate::event::EventKind;
+// ── Effects ──
+pub use crate::effects::{DelayMode, DistortionMode};
 
 // ── Duration helpers ──
 pub use crate::duration::{bars, dot, dotted, e, h, q, s, t, triplet, w};
@@ -31,9 +28,3 @@ pub use crate::harmony::{
 
 // ── Notes ──
 pub use crate::notes::*;
-
-// ── Advanced / direct use (old API still accessible) ──
-pub use crate::clip::Clip;
-pub use crate::engine::{Engine, EngineHandle};
-pub use crate::session::Session;
-pub use crate::synth::Synth;

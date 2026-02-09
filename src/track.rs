@@ -1,11 +1,8 @@
-use std::collections::HashMap;
-
 use crate::automation::{AutomationFn, Clock, PatternFn, Phrase};
-use crate::clip::Clip;
 use crate::effects::StereoFrame;
 use crate::event::{Event, Param};
 use crate::patch::Patch;
-use crate::score::{time_to_sample, SequencePlayer, Tempo};
+use crate::score::{time_to_sample, Score, SequencePlayer, Tempo};
 use crate::synth::Synth;
 
 struct ClipGenerator {
@@ -15,7 +12,6 @@ struct ClipGenerator {
 }
 
 impl ClipGenerator {
-    /// Run the pattern function to produce fresh events and replace player events.
     fn regenerate(&mut self, player: &mut SequencePlayer, beat: f32, iteration: u32) {
         let mut phrase = Phrase::with_context(beat, iteration);
         (self.func)(&mut phrase);
@@ -42,7 +38,7 @@ struct ClipSlot {
 
 pub struct Track {
     pub(crate) synth: Synth,
-    slots: HashMap<String, ClipSlot>,
+    slot: Option<ClipSlot>,
     pub gain: f32,
     pub(crate) fx_chain: Vec<Box<dyn crate::effects::Effect>>,
     pub(crate) automations: Vec<(Param, AutomationFn)>,
@@ -55,7 +51,7 @@ impl Track {
     pub fn new(sample_rate: f32, patch: Patch, polyphony: usize) -> Self {
         Self {
             synth: Synth::with_patch(sample_rate, polyphony, patch),
-            slots: HashMap::new(),
+            slot: None,
             gain: 1.0,
             fx_chain: Vec::new(),
             automations: Vec::new(),
@@ -65,40 +61,21 @@ impl Track {
         }
     }
 
-    pub fn launch(&mut self, clip: Clip, tempo: Tempo, sample_rate: f32, current_sample: u64) {
-        self.launch_inner(clip, tempo, sample_rate, current_sample, None);
-    }
-
-    pub fn launch_with_pattern(
+    pub fn launch(
         &mut self,
-        clip: Clip,
+        score: Score,
+        loop_beats: Option<f32>,
         tempo: Tempo,
-        sample_rate: f32,
-        current_sample: u64,
-        pattern_fn: PatternFn,
-    ) {
-        self.launch_inner(clip, tempo, sample_rate, current_sample, Some(pattern_fn));
-    }
-
-    fn launch_inner(
-        &mut self,
-        clip: Clip,
-        tempo: Tempo,
-        sample_rate: f32,
         current_sample: u64,
         pattern_fn: Option<PatternFn>,
     ) {
-        let name = clip.name.clone();
-        self.loop_beats = clip.loop_beats;
-        let sequence = clip.score.to_sequence(tempo, sample_rate);
+        self.loop_beats = loop_beats;
+        let sequence = score.to_sequence(tempo, self.sample_rate);
 
-        let loop_samples = clip.loop_beats.map(|beats| {
+        let player = if let Some(beats) = loop_beats {
             let seconds = beats * 60.0 / tempo.bpm;
-            (seconds * sample_rate) as u64
-        });
-
-        let player = if let Some(loop_len) = loop_samples {
-            sequence.loop_player(loop_len)
+            let loop_samples = (seconds * self.sample_rate) as u64;
+            sequence.loop_player(loop_samples)
         } else {
             sequence.player()
         };
@@ -106,7 +83,7 @@ impl Track {
         let generator = pattern_fn.map(|func| ClipGenerator {
             func,
             tempo,
-            sample_rate,
+            sample_rate: self.sample_rate,
         });
 
         let mut slot = ClipSlot {
@@ -117,23 +94,16 @@ impl Track {
             iteration: 0,
         };
 
-        // Run generator immediately for first iteration
         if let Some(ref mut g) = slot.generator {
-            let beat = current_sample as f64 / sample_rate as f64 * tempo.bpm as f64 / 60.0;
+            let beat = current_sample as f64 / self.sample_rate as f64 * tempo.bpm as f64 / 60.0;
             g.regenerate(&mut slot.player, beat as f32, 0);
         }
 
-        self.slots.insert(name, slot);
+        self.slot = Some(slot);
     }
 
-    pub fn stop(&mut self, clip_name: &str) {
-        if let Some(slot) = self.slots.get_mut(clip_name) {
-            slot.active = false;
-        }
-    }
-
-    pub fn stop_all(&mut self) {
-        for slot in self.slots.values_mut() {
+    pub fn stop(&mut self) {
+        if let Some(slot) = &mut self.slot {
             slot.active = false;
         }
     }
@@ -149,28 +119,26 @@ impl Track {
         let sample_rate = self.sample_rate;
 
         // Dispatch clip events
-        for slot in self.slots.values_mut() {
-            if !slot.active || sample_idx < slot.start_sample {
-                continue;
-            }
+        if let Some(slot) = &mut self.slot {
+            if slot.active && sample_idx >= slot.start_sample {
+                let looped = slot.player.advance_loop(sample_idx);
 
-            let looped = slot.player.advance_loop(sample_idx);
-
-            // Regenerate on loop boundary
-            if looped {
-                slot.iteration += 1;
-                if let Some(ref mut g) = slot.generator {
-                    let beat = sample_idx as f64 / sample_rate as f64 * tempo.bpm as f64 / 60.0;
-                    g.regenerate(&mut slot.player, beat as f32, slot.iteration);
+                if looped {
+                    slot.iteration += 1;
+                    if let Some(ref mut g) = slot.generator {
+                        let beat =
+                            sample_idx as f64 / sample_rate as f64 * tempo.bpm as f64 / 60.0;
+                        g.regenerate(&mut slot.player, beat as f32, slot.iteration);
+                    }
                 }
-            }
 
-            while let Some(e) = slot.player.peek() {
-                if e.sample > sample_idx {
-                    break;
+                while let Some(e) = slot.player.peek() {
+                    if e.sample > sample_idx {
+                        break;
+                    }
+                    slot.player.pop();
+                    self.synth.apply_event(e.kind);
                 }
-                slot.player.pop();
-                self.synth.apply_event(e.kind);
             }
         }
 
@@ -203,7 +171,6 @@ impl Track {
             frame = fx.process(frame, sample_rate);
         }
 
-        // Apply gain to both channels
         [frame[0] * self.gain, frame[1] * self.gain]
     }
 }

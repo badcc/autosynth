@@ -1,10 +1,9 @@
 use std::sync::mpsc;
 
 use crate::automation::{AutomationFn, PatternFn};
-use crate::clip::Clip;
 use crate::event::Param;
 use crate::patch::Patch;
-use crate::score::Tempo;
+use crate::score::{Score, Tempo};
 use crate::session::Session;
 
 pub enum Command {
@@ -16,16 +15,14 @@ pub enum Command {
     },
     RemoveTrack(String),
 
-    // Clip operations (track-scoped)
-    LaunchClip {
+    // Playback
+    Launch {
         track: String,
-        clip: Clip,
+        score: Score,
+        loop_beats: Option<f32>,
         pattern_fn: Option<PatternFn>,
     },
-    StopClip {
-        track: String,
-        clip: String,
-    },
+    StopTrack(String),
     StopAll,
 
     // Patch/param (track-scoped)
@@ -82,27 +79,26 @@ impl EngineHandle {
         let _ = self.tx.send(Command::RemoveTrack(name.to_string()));
     }
 
-    pub fn launch(&self, track: &str, clip: Clip) {
-        let _ = self.tx.send(Command::LaunchClip {
+    pub fn launch(&self, track: &str, score: Score) {
+        let _ = self.tx.send(Command::Launch {
             track: track.to_string(),
-            clip,
+            score,
+            loop_beats: None,
             pattern_fn: None,
         });
     }
 
-    pub fn launch_with_pattern(&self, track: &str, clip: Clip, pattern_fn: PatternFn) {
-        let _ = self.tx.send(Command::LaunchClip {
+    pub fn launch_with_pattern(&self, track: &str, loop_beats: f32, pattern_fn: PatternFn) {
+        let _ = self.tx.send(Command::Launch {
             track: track.to_string(),
-            clip,
+            score: Score::new(),
+            loop_beats: Some(loop_beats),
             pattern_fn: Some(pattern_fn),
         });
     }
 
-    pub fn stop(&self, track: &str, clip: &str) {
-        let _ = self.tx.send(Command::StopClip {
-            track: track.to_string(),
-            clip: clip.to_string(),
-        });
+    pub fn stop(&self, track: &str) {
+        let _ = self.tx.send(Command::StopTrack(track.to_string()));
     }
 
     pub fn stop_all(&self) {
@@ -192,8 +188,7 @@ impl Engine {
     /// Build a cpal output stream, consuming the engine.
     ///
     /// The engine moves into the audio callback. Use the `EngineHandle`
-    /// returned from `Engine::new` to send commands (launch clips, set
-    /// params, etc.) from any thread.
+    /// returned from `Engine::new` to send commands from any thread.
     pub fn build_stream(
         self,
         device: &cpal::Device,
@@ -224,16 +219,17 @@ impl Engine {
             Command::RemoveTrack(name) => {
                 self.session.remove_track(&name);
             }
-            Command::LaunchClip {
+            Command::Launch {
                 track,
-                clip,
+                score,
+                loop_beats,
                 pattern_fn,
             } => {
                 self.session
-                    .launch_clip(&track, clip, self.sample_pos, pattern_fn);
+                    .launch(&track, score, loop_beats, self.sample_pos, pattern_fn);
             }
-            Command::StopClip { track, clip } => {
-                self.session.stop(&track, &clip);
+            Command::StopTrack(track) => {
+                self.session.stop(&track);
             }
             Command::StopAll => {
                 self.session.stop_all();

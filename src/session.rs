@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 
 use crate::automation::PatternFn;
-use crate::clip::Clip;
 use crate::patch::Patch;
-use crate::score::Tempo;
+use crate::score::{Score, Tempo};
 use crate::track::Track;
 
 pub struct Session {
@@ -42,35 +41,31 @@ impl Session {
         self.tracks.get_mut(name)
     }
 
-    pub fn launch_clip(
+    pub fn launch(
         &mut self,
         track: &str,
-        clip: Clip,
+        score: Score,
+        loop_beats: Option<f32>,
         current_sample: u64,
         pattern_fn: Option<PatternFn>,
     ) {
-        // Auto-create track with default patch if it doesn't exist
         if !self.tracks.contains_key(track) {
             self.add_track(track.to_string(), Patch::new(), 8);
         }
         if let Some(t) = self.tracks.get_mut(track) {
-            if let Some(pf) = pattern_fn {
-                t.launch_with_pattern(clip, self.tempo, self.sample_rate, current_sample, pf);
-            } else {
-                t.launch(clip, self.tempo, self.sample_rate, current_sample);
-            }
+            t.launch(score, loop_beats, self.tempo, current_sample, pattern_fn);
         }
     }
 
-    pub fn stop(&mut self, track: &str, clip: &str) {
+    pub fn stop(&mut self, track: &str) {
         if let Some(t) = self.tracks.get_mut(track) {
-            t.stop(clip);
+            t.stop();
         }
     }
 
     pub fn stop_all(&mut self) {
         for track in self.tracks.values_mut() {
-            track.stop_all();
+            track.stop();
         }
     }
 

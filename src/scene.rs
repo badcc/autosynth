@@ -3,12 +3,11 @@ use std::collections::{HashMap, HashSet};
 
 use subsecond::{HotFn, HotFnPtr};
 
-use crate::automation::{AutomationFn, Clock, IntoVal, PatternFn, Val};
-use crate::clip::Clip;
+use crate::automation::{AutomationFn, Clock, IntoVal, PatternFn, Phrase, Val};
 use crate::effect_config::EffectConfig;
 use crate::engine::EngineHandle;
 use crate::envelope::RetriggerMode;
-use crate::event::{EventKind, Param};
+use crate::event::Param;
 use crate::filter::FilterType;
 use crate::oscillator::Oscillator;
 use crate::patch::Patch;
@@ -123,7 +122,7 @@ pub struct SceneTrack {
     patch: Patch,
     polyphony: usize,
     effects: Vec<EffectConfig>,
-    events: Vec<(Time, EventKind)>,
+    phrase: Phrase,
     loop_beats: Option<f32>,
     pattern_fn: Option<PatternFn>,
     automations: Vec<(Param, AutomationFn)>,
@@ -136,7 +135,7 @@ impl SceneTrack {
             patch: Patch::new(),
             polyphony: 8,
             effects: Vec::new(),
-            events: Vec::new(),
+            phrase: Phrase::new(),
             loop_beats: None,
             pattern_fn: None,
             automations: Vec::new(),
@@ -150,7 +149,7 @@ impl SceneTrack {
             patch,
             polyphony,
             effects,
-            events,
+            phrase,
             loop_beats,
             pattern_fn,
             automations,
@@ -165,14 +164,14 @@ impl SceneTrack {
 
         // Looping pattern via every()
         if let Some(pf) = pattern_fn {
-            let clip = Clip::looped("live", loop_beats.unwrap());
-            handle.launch_with_pattern(name, clip, pf);
+            handle.launch_with_pattern(name, loop_beats.unwrap(), pf);
         }
         // One-shot notes (no every())
-        else if !events.is_empty() {
-            let mut clip = Clip::new("live");
-            clip.score = Score::from_events(events);
-            handle.launch(name, clip);
+        else {
+            let events = phrase.into_events();
+            if !events.is_empty() {
+                handle.launch(name, Score::from_events(events));
+            }
         }
 
         if !automations.is_empty() {
@@ -333,30 +332,15 @@ impl SceneTrack {
     // ── One-shot notes (no looping) ──
 
     pub fn note(&mut self, time: Time, note: u8, vel: f32, dur: f32) {
-        let end_time = match time {
-            Time::Seconds(s) => Time::Seconds(s + dur),
-            Time::Beats(b) => Time::Beats(b + dur),
-        };
-        self.events
-            .push((time, EventKind::NoteOn { note, vel }));
-        self.events
-            .push((end_time, EventKind::NoteOff { note }));
+        self.phrase.note(time, note, vel, dur);
     }
 
     pub fn chord(&mut self, time: Time, notes: &[u8], vel: f32, dur: f32) {
-        for &n in notes {
-            self.note(time, n, vel, dur);
-        }
+        self.phrase.chord(time, notes, vel, dur);
     }
 
     pub fn pattern(&mut self, start: Time, pattern: &Pattern) {
-        for pn in pattern.notes() {
-            let time = match start {
-                Time::Seconds(s) => Time::Seconds(s + pn.beat),
-                Time::Beats(b) => Time::Beats(b + pn.beat),
-            };
-            self.note(time, pn.note, pn.velocity, pn.duration);
-        }
+        self.phrase.pattern(start, pattern);
     }
 
     // ── Sub-function delegation (for granular hot-reload) ──

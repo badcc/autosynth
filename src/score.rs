@@ -1,6 +1,4 @@
-use crate::event::{Event, EventKind, Param};
-use crate::patch::Patch;
-use crate::pattern::Pattern;
+use crate::event::{Event, EventKind};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tempo {
@@ -39,51 +37,8 @@ impl Score {
         Self { events: Vec::new() }
     }
 
-    /// Create a Score from a pre-built event list (used by the scene diff system).
     pub fn from_events(events: Vec<(Time, EventKind)>) -> Self {
         Self { events }
-    }
-
-    pub fn note(&mut self, time: Time, note: u8, vel: f32, dur: f32) -> &mut Self {
-        let end_time = match time {
-            Time::Seconds(s) => Time::Seconds(s + dur),
-            Time::Beats(b) => Time::Beats(b + dur),
-        };
-        self.events.push((time, EventKind::NoteOn { note, vel }));
-        self.events.push((end_time, EventKind::NoteOff { note }));
-        self
-    }
-
-    pub fn chord(&mut self, time: Time, notes: &[u8], vel: f32, dur: f32) -> &mut Self {
-        for &n in notes {
-            self.note(time, n, vel, dur);
-        }
-        self
-    }
-
-    pub fn pattern(&mut self, start: Time, pattern: &Pattern) -> &mut Self {
-        for pn in pattern.notes() {
-            let time = match start {
-                Time::Seconds(s) => Time::Seconds(s + pn.beat),
-                Time::Beats(b) => Time::Beats(b + pn.beat),
-            };
-            self.note(time, pn.note, pn.velocity, pn.duration);
-        }
-        self
-    }
-
-    pub fn param(&mut self, time: Time, param: Param, value: f32) -> &mut Self {
-        self.events.push((time, EventKind::Param { param, value }));
-        self
-    }
-
-    pub fn patch(&mut self, time: Time, patch: Patch) -> &mut Self {
-        self.events.push((time, EventKind::SetPatch { patch }));
-        self
-    }
-
-    pub fn events(&self) -> &[(Time, EventKind)] {
-        &self.events
     }
 
     pub(crate) fn to_sequence(&self, tempo: Tempo, sample_rate: f32) -> Sequence {

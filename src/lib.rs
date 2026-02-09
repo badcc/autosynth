@@ -1,5 +1,4 @@
 pub mod automation;
-pub mod clip;
 pub mod duration;
 pub mod effect_config;
 pub mod effects;
