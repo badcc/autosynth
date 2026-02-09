@@ -56,23 +56,17 @@ impl OscillatorState {
 
     pub(crate) fn render(&mut self, base_freq: f32, dt: f32) -> f32 {
         let mut total = 0.0;
-        let mut total_level = 0.0;
 
         for (i, config) in self.configs.iter().enumerate() {
             let detune_ratio = 2.0_f32.powf(config.detune_semitones / 12.0);
             let freq = base_freq * detune_ratio;
             let sample = render_waveform(config.waveform, self.phases[i]);
             total += sample * config.level;
-            total_level += config.level;
 
             self.phases[i] = (self.phases[i] + freq * dt) % 1.0;
         }
 
-        if total_level > 0.0 {
-            total / total_level
-        } else {
-            0.0
-        }
+        total
     }
 
     pub(crate) fn reset(&mut self) {
