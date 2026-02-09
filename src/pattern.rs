@@ -145,8 +145,8 @@ fn compute_euclidean(hits: usize, steps: usize) -> Vec<bool> {
             new_counts.push(counts.pop().unwrap() + remainders.pop().unwrap());
         }
 
-        new_remainders.extend(counts.drain(..));
-        new_remainders.extend(remainders.drain(..));
+        new_remainders.append(&mut counts);
+        new_remainders.append(&mut remainders);
 
         counts = new_counts;
         remainders = new_remainders;

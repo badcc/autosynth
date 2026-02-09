@@ -41,7 +41,7 @@ fn lead(t: &mut Track) {
     t.release(0.01);
     t.retrigger(RetriggerMode::Soft);
     t.filter_type(FilterType::Lowpass);
-    t.cutoff(|beat: f32| 600.0 + 200.0 * (beat * 0.5 * TAU).sin());
+    t.cutoff(|c: Clock| 1000.0 + 300.0 * (c.beat * 0.025 * TAU).sin());
     t.resonance(0.1);
     t.polyphony(1);
 

@@ -17,6 +17,12 @@ pub struct Svf {
     ic2eq: f32,
 }
 
+impl Default for Svf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Svf {
     pub fn new() -> Self {
         Self {

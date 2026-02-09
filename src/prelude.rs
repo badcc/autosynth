@@ -1,5 +1,5 @@
 // ── Scene API (primary) ──
-pub use crate::automation::{IntoVal, Phrase};
+pub use crate::automation::{Clock, IntoVal, Phrase};
 pub use crate::live::live;
 pub use crate::scene::{Scene, SceneTrack as Track};
 

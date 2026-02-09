@@ -203,7 +203,7 @@ pub fn note(s: &str) -> Option<u8> {
 
     let midi = 12 + (octave as i16 * 12) + base as i16 + accidental as i16;
 
-    if midi >= 0 && midi <= 127 {
+    if (0..=127).contains(&midi) {
         Some(midi as u8)
     } else {
         None

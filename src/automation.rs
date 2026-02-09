@@ -2,11 +2,33 @@ use crate::event::EventKind;
 use crate::pattern::Pattern;
 use crate::score::Time;
 
-// ── Val: a parameter that is either fixed or beat-driven ──
+// ── Clock: timing context passed to parameter closures ──
+
+/// Timing context for parameter automation closures.
+#[derive(Clone, Copy, Debug)]
+pub struct Clock {
+    /// Global beat position since playback start.
+    pub beat: f32,
+    /// Beat position within the current loop (0..loop_length).
+    /// Equal to `beat` if the track is not looping.
+    pub local: f32,
+    /// Current loop iteration (0 on first play, increments each loop).
+    pub iteration: u32,
+}
+
+impl Clock {
+    pub(crate) const ZERO: Clock = Clock {
+        beat: 0.0,
+        local: 0.0,
+        iteration: 0,
+    };
+}
+
+// ── Val: a parameter that is either fixed or clock-driven ──
 
 pub enum Val {
     Fixed(f32),
-    Fn(Box<dyn FnMut(f32) -> f32 + Send>),
+    Fn(Box<dyn FnMut(Clock) -> f32 + Send>),
 }
 
 pub trait IntoVal {
@@ -19,7 +41,7 @@ impl IntoVal for f32 {
     }
 }
 
-impl<F: FnMut(f32) -> f32 + Send + 'static> IntoVal for F {
+impl<F: FnMut(Clock) -> f32 + Send + 'static> IntoVal for F {
     fn into_val(self) -> Val {
         Val::Fn(Box::new(self))
     }
@@ -27,18 +49,34 @@ impl<F: FnMut(f32) -> f32 + Send + 'static> IntoVal for F {
 
 // ── Internal types (audio thread) ──
 
-pub(crate) type AutomationFn = Box<dyn FnMut(f32) -> f32 + Send>;
+pub(crate) type AutomationFn = Box<dyn FnMut(Clock) -> f32 + Send>;
 pub(crate) type PatternFn = Box<dyn FnMut(&mut Phrase) + Send>;
 
 // ── Phrase: note builder used inside every() closures ──
 
 pub struct Phrase {
     events: Vec<(Time, EventKind)>,
+    /// Global beat at the start of this loop iteration.
+    pub beat: f32,
+    /// Loop iteration count (0 on first play).
+    pub iteration: u32,
 }
 
 impl Phrase {
     pub fn new() -> Self {
-        Self { events: Vec::new() }
+        Self {
+            events: Vec::new(),
+            beat: 0.0,
+            iteration: 0,
+        }
+    }
+
+    pub(crate) fn with_context(beat: f32, iteration: u32) -> Self {
+        Self {
+            events: Vec::new(),
+            beat,
+            iteration,
+        }
     }
 
     pub fn note(&mut self, time: Time, note: u8, vel: f32, dur: f32) -> &mut Self {

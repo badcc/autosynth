@@ -48,6 +48,12 @@ pub struct DelayBuilder {
     config: DelayConfig,
 }
 
+impl Default for DelayBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DelayBuilder {
     pub fn new() -> Self {
         Self {
@@ -120,6 +126,12 @@ impl DistortionConfig {
 
 pub struct DistortionBuilder {
     config: DistortionConfig,
+}
+
+impl Default for DistortionBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DistortionBuilder {
@@ -208,6 +220,12 @@ impl ChorusConfig {
 
 pub struct ChorusBuilder {
     config: ChorusConfig,
+}
+
+impl Default for ChorusBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ChorusBuilder {

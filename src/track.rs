@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::automation::{AutomationFn, PatternFn, Phrase};
+use crate::automation::{AutomationFn, Clock, PatternFn, Phrase};
 use crate::clip::Clip;
 use crate::effects::StereoFrame;
 use crate::event::{Event, Param};
@@ -16,8 +16,8 @@ struct ClipGenerator {
 
 impl ClipGenerator {
     /// Run the pattern function to produce fresh events and replace player events.
-    fn regenerate(&mut self, player: &mut SequencePlayer) {
-        let mut phrase = Phrase::new();
+    fn regenerate(&mut self, player: &mut SequencePlayer, beat: f32, iteration: u32) {
+        let mut phrase = Phrase::with_context(beat, iteration);
         (self.func)(&mut phrase);
         let mut events: Vec<Event> = phrase
             .into_events()
@@ -37,6 +37,7 @@ struct ClipSlot {
     generator: Option<ClipGenerator>,
     start_sample: u64,
     active: bool,
+    iteration: u32,
 }
 
 pub struct Track {
@@ -46,6 +47,7 @@ pub struct Track {
     pub(crate) fx_chain: Vec<Box<dyn crate::effects::Effect>>,
     pub(crate) automations: Vec<(Param, AutomationFn)>,
     sample_rate: f32,
+    loop_beats: Option<f32>,
     last_automation_tick: u64,
 }
 
@@ -58,6 +60,7 @@ impl Track {
             fx_chain: Vec::new(),
             automations: Vec::new(),
             sample_rate,
+            loop_beats: None,
             last_automation_tick: u64::MAX,
         }
     }
@@ -86,6 +89,7 @@ impl Track {
         pattern_fn: Option<PatternFn>,
     ) {
         let name = clip.name.clone();
+        self.loop_beats = clip.loop_beats;
         let sequence = clip.score.to_sequence(tempo, sample_rate);
 
         let loop_samples = clip.loop_beats.map(|beats| {
@@ -110,11 +114,13 @@ impl Track {
             generator,
             start_sample: current_sample,
             active: true,
+            iteration: 0,
         };
 
         // Run generator immediately for first iteration
         if let Some(ref mut g) = slot.generator {
-            g.regenerate(&mut slot.player);
+            let beat = current_sample as f64 / sample_rate as f64 * tempo.bpm as f64 / 60.0;
+            g.regenerate(&mut slot.player, beat as f32, 0);
         }
 
         self.slots.insert(name, slot);
@@ -152,8 +158,10 @@ impl Track {
 
             // Regenerate on loop boundary
             if looped {
+                slot.iteration += 1;
                 if let Some(ref mut g) = slot.generator {
-                    g.regenerate(&mut slot.player);
+                    let beat = sample_idx as f64 / sample_rate as f64 * tempo.bpm as f64 / 60.0;
+                    g.regenerate(&mut slot.player, beat as f32, slot.iteration);
                 }
             }
 
@@ -171,8 +179,18 @@ impl Track {
         let tick = (beat * 4.0) as u64;
         if tick != self.last_automation_tick {
             self.last_automation_tick = tick;
+            let beat_f32 = beat as f32;
+            let (local, iteration) = match self.loop_beats {
+                Some(len) => (beat_f32 % len, (beat_f32 / len) as u32),
+                None => (beat_f32, 0),
+            };
+            let clock = Clock {
+                beat: beat_f32,
+                local,
+                iteration,
+            };
             for (param, func) in &mut self.automations {
-                self.synth.set_param(*param, func(beat as f32));
+                self.synth.set_param(*param, func(clock));
             }
         }
 

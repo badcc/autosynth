@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use subsecond::{HotFn, HotFnPtr};
 
-use crate::automation::{AutomationFn, IntoVal, PatternFn, Val};
+use crate::automation::{AutomationFn, Clock, IntoVal, PatternFn, Val};
 use crate::clip::Clip;
 use crate::effect_config::EffectConfig;
 use crate::engine::EngineHandle;
@@ -76,11 +76,10 @@ impl Scene {
         let mut hot = HotFn::current(f);
         let ptr = hot.ptr_address();
 
-        if let Some(old_ptr) = self.ptrs.get(&id) {
-            if *old_ptr == ptr {
+        if let Some(old_ptr) = self.ptrs.get(&id)
+            && *old_ptr == ptr {
                 return;
             }
-        }
 
         // Function changed (or new track) — evaluate and rebuild
         self.ptrs.insert(id, ptr);
@@ -201,7 +200,7 @@ impl SceneTrack {
         match v.into_val() {
             Val::Fixed(f) => self.patch.master_gain = f,
             Val::Fn(mut f) => {
-                self.patch.master_gain = f(0.0);
+                self.patch.master_gain = f(Clock::ZERO);
                 self.automations.push((Param::MasterGain, f));
             }
         }
@@ -211,7 +210,7 @@ impl SceneTrack {
         match v.into_val() {
             Val::Fixed(f) => self.patch.attack = f,
             Val::Fn(mut f) => {
-                self.patch.attack = f(0.0);
+                self.patch.attack = f(Clock::ZERO);
                 self.automations.push((Param::Attack, f));
             }
         }
@@ -221,7 +220,7 @@ impl SceneTrack {
         match v.into_val() {
             Val::Fixed(f) => self.patch.decay = f,
             Val::Fn(mut f) => {
-                self.patch.decay = f(0.0);
+                self.patch.decay = f(Clock::ZERO);
                 self.automations.push((Param::Decay, f));
             }
         }
@@ -231,7 +230,7 @@ impl SceneTrack {
         match v.into_val() {
             Val::Fixed(f) => self.patch.sustain = f,
             Val::Fn(mut f) => {
-                self.patch.sustain = f(0.0);
+                self.patch.sustain = f(Clock::ZERO);
                 self.automations.push((Param::Sustain, f));
             }
         }
@@ -241,7 +240,7 @@ impl SceneTrack {
         match v.into_val() {
             Val::Fixed(f) => self.patch.release = f,
             Val::Fn(mut f) => {
-                self.patch.release = f(0.0);
+                self.patch.release = f(Clock::ZERO);
                 self.automations.push((Param::Release, f));
             }
         }
@@ -251,7 +250,7 @@ impl SceneTrack {
         match v.into_val() {
             Val::Fixed(f) => self.patch.cutoff = f,
             Val::Fn(mut f) => {
-                self.patch.cutoff = f(0.0);
+                self.patch.cutoff = f(Clock::ZERO);
                 self.automations.push((Param::Cutoff, f));
             }
         }
@@ -261,7 +260,7 @@ impl SceneTrack {
         match v.into_val() {
             Val::Fixed(f) => self.patch.resonance = f,
             Val::Fn(mut f) => {
-                self.patch.resonance = f(0.0);
+                self.patch.resonance = f(Clock::ZERO);
                 self.automations.push((Param::Resonance, f));
             }
         }
@@ -271,7 +270,7 @@ impl SceneTrack {
         match v.into_val() {
             Val::Fixed(f) => self.patch.lfo_rate = f,
             Val::Fn(mut f) => {
-                self.patch.lfo_rate = f(0.0);
+                self.patch.lfo_rate = f(Clock::ZERO);
                 self.automations.push((Param::LfoRate, f));
             }
         }
@@ -281,7 +280,7 @@ impl SceneTrack {
         match v.into_val() {
             Val::Fixed(f) => self.patch.lfo_depth = f,
             Val::Fn(mut f) => {
-                self.patch.lfo_depth = f(0.0);
+                self.patch.lfo_depth = f(Clock::ZERO);
                 self.automations.push((Param::LfoDepth, f));
             }
         }

@@ -2,6 +2,7 @@
 ///
 /// Only affects voices that are already active. Fresh voices always start clean.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum RetriggerMode {
     /// Reset envelope to zero, restart attack. Reset oscillator phase and filter.
     /// Percussive and distinct, but clicks when stealing an active voice.
@@ -9,6 +10,7 @@ pub enum RetriggerMode {
     /// Restart attack from the current envelope level. Preserve oscillator phase
     /// and filter state — no discontinuity in the waveform or amplitude.
     /// Each note still gets its own attack transient, just without the click.
+    #[default]
     Soft,
     /// If the voice is still in its note-on phase (attack/decay/sustain), just change
     /// pitch — don't retrigger the envelope or touch oscillators/filter at all.
@@ -17,11 +19,6 @@ pub enum RetriggerMode {
     Legato,
 }
 
-impl Default for RetriggerMode {
-    fn default() -> Self {
-        Self::Soft
-    }
-}
 
 #[derive(Clone, Copy, Debug)]
 pub enum EnvState {
