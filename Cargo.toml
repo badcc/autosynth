@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0"
 cpal = "0.15"
+rand = "0.10.0"
 
 [dev-dependencies]
 subsecond = "0.7"

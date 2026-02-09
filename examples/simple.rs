@@ -5,47 +5,57 @@ use rustsynth::{duration, prelude::*};
 fn chords() -> Clip {
     Clip::looped("chords", 8.0).build(|s| {
         // s.note(b(0.0), E3, 0.5, duration::s());
-        s.chord(b(0.0), &diatonic_triad(E3, &MINOR, 1), 0.5, duration::s());
-        s.chord(b(2.0), &diatonic_triad(E3, &MINOR, 6), 0.5, duration::s());
-        s.chord(b(4.0), &diatonic_triad(E3, &MINOR, 2), 0.5, duration::s());
-        s.chord(b(6.0), &diatonic_triad(E3, &MINOR, 5), 0.5, duration::s());
+        s.chord(b(0.0), &diatonic_triad(E3, &MAJOR, 1), 0.5, duration::s());
+        s.chord(b(2.0), &diatonic_triad(E3, &MAJOR, 6), 0.7, duration::s());
+        s.chord(b(4.0), &diatonic_triad(E3, &MAJOR, 2), 0.6, duration::s());
+        s.chord(b(6.0), &diatonic_triad(E3, &MAJOR, 5), 0.5, duration::s());
     })
 }
 
 fn lead() -> Clip {
-    Clip::looped("lead", 4.0).build(|s| {
+    Clip::looped("lead", 8.0).build(|s| {
         // s.note(b(0.0), E3, 0.5, duration::s());
         s.note(
             b(0.0),
-            degree(E3, &MINOR, 1),
+            degree(E3, &MAJOR, 1),
             1.0,
             duration::q() - duration::t(),
         );
-        // s.note(b(duration::q()), degree(E3, &MINOR, 6), 1.0, duration::s());
-        // s.note(
-        //     b(duration::q() * 2.0),
-        //     degree(E3, &MINOR, 2),
-        //     1.0,
-        //     duration::q() - duration::t(),
-        // );
-        // s.note(
-        //     b(duration::q() * 3.0),
-        //     degree(E3, &MINOR, 5),
-        //     1.0,
-        //     duration::s(),
-        // );
+        s.note(b(duration::q()), degree(E4, &MAJOR, 6), 0.5, duration::s());
+        s.note(
+            b(duration::q() * 2.0),
+            degree(E3, &MAJOR, 2),
+            1.0,
+            duration::q() - duration::t(),
+        );
+        s.note(
+            b(duration::q() * 3.0),
+            degree(E4, &MAJOR, 5),
+            0.5,
+            duration::s(),
+        );
+
+        // let reverse = false;
+        for i in 0..3 {
+            s.note(
+                b(7.0 + i as f32 * 0.125 + rand::random_range(0.0..0.125)),
+                degree(E4, &MAJOR, 3 - i),
+                1.0 - i as f32 * 0.3,
+                duration::s(),
+            );
+        }
         // s.note(b(duration::s()*2.0), E4+2, 1.0, duration::s());
         // s.note(b(duration::s()*3.0), E4+3, 1.0, duration::q());
-        // s.chord(b(2.0), &diatonic_triad(E4, &MINOR, 6), 0.5, duration::s());
-        // s.chord(b(4.0), &diatonic_triad(E4, &MINOR, 2), 0.5, duration::s());
-        // s.chord(b(6.0), &diatonic_triad(E4, &MINOR, 5), 0.5, duration::s());
+        // s.chord(b(2.0), &diatonic_triad(E4, &MAJOR, 6), 0.5, duration::s());
+        // s.chord(b(4.0), &diatonic_triad(E4, &MAJOR, 2), 0.5, duration::s());
+        // s.chord(b(6.0), &diatonic_triad(E4, &MAJOR, 5), 0.5, duration::s());
     })
 }
 
 fn bass() -> Clip {
     Clip::looped("bass", 8.0).build(|s| {
         s.note(b(0.0), E2, 0.9, h());
-        s.note(b(6.0), E2 + 2, 0.9, 2.0);
+        s.note(b(6.0), E2 + 2, 0.9, 1.9);
         // TODO: FIX: bug .. if note is playing when we loop, it gets stuck forever..
         // e.g. 6.0 + 2.0 = 8.0, our loop beats
     })
@@ -73,7 +83,7 @@ fn main() -> Result<()> {
                 //     .phase_offset(0.2)
                 //     .level(0.5),
             ])
-            // .master_gain(1.0)
+            .master_gain(0.5)
             .attack(0.05)
             // .filter_type(FilterType::Lowpass)
             // .cutoff(1200.0)
@@ -91,6 +101,7 @@ fn main() -> Result<()> {
                     .detune(0.05)
                     .phase_offset(0.1),
             ])
+            .master_gain(0.6)
             .attack(0.01)
             .sustain(1.0)
             .decay(0.0)
@@ -105,7 +116,8 @@ fn main() -> Result<()> {
         "bass",
         Patch::new()
             .oscillators(vec![Oscillator::new(Waveform::Saw)])
-            .cutoff(800.0),
+            .cutoff(800.0)
+            .master_gain(0.5),
     );
 
     // Add effects to tracks
@@ -127,7 +139,7 @@ fn main() -> Result<()> {
     // Launch clips onto specific tracks
     handle.launch("chords", chords());
     handle.launch("bass", bass());
-    // handle.launch("lead", lead());
+    handle.launch("lead", lead());
 
     // Engine moves into the audio callback, no Arc<Mutex<...>> needed
     let stream = engine
