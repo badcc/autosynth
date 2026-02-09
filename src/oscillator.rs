@@ -2,7 +2,7 @@ use std::f32::consts::PI;
 
 use crate::waveform::Waveform;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Oscillator {
     pub waveform: Waveform,
     pub detune_semitones: f32,
@@ -36,6 +36,23 @@ impl Oscillator {
     }
 
     pub fn phase_offset(mut self, offset: f32) -> Self {
+        self.phase_offset = offset;
+        self
+    }
+
+    // &mut self setters for scene API chaining (osc() returns &mut Oscillator)
+
+    pub fn set_detune(&mut self, semitones: f32) -> &mut Self {
+        self.detune_semitones = semitones;
+        self
+    }
+
+    pub fn set_level(&mut self, level: f32) -> &mut Self {
+        self.level = level;
+        self
+    }
+
+    pub fn set_phase_offset(&mut self, offset: f32) -> &mut Self {
         self.phase_offset = offset;
         self
     }

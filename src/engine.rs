@@ -114,6 +114,13 @@ impl EngineHandle {
         });
     }
 
+    pub fn add_effect_boxed(&self, track: &str, effect: Box<dyn crate::effects::Effect>) {
+        let _ = self.tx.send(Command::AddEffect {
+            track: track.to_string(),
+            effect,
+        });
+    }
+
     pub fn clear_effects(&self, track: &str) {
         let _ = self.tx.send(Command::ClearEffects(track.to_string()));
     }

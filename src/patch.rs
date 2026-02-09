@@ -3,7 +3,7 @@ use crate::filter::FilterType;
 use crate::oscillator::Oscillator;
 use crate::waveform::Waveform;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Patch {
     pub oscillators: Vec<Oscillator>,
     pub cutoff: f32,

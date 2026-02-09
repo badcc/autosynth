@@ -1,6 +1,6 @@
 use crate::patch::Patch;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Param {
     Attack,
     Decay,
@@ -13,7 +13,7 @@ pub enum Param {
     MasterGain,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum EventKind {
     NoteOn { note: u8, vel: f32 },
     NoteOff { note: u8 },

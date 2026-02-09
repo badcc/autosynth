@@ -2,7 +2,7 @@ use crate::event::{Event, EventKind, Param};
 use crate::patch::Patch;
 use crate::pattern::Pattern;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tempo {
     pub bpm: f32,
 }
@@ -13,7 +13,7 @@ impl Tempo {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Time {
     Seconds(f32),
     Beats(f32),
@@ -37,6 +37,11 @@ pub struct Score {
 impl Score {
     pub fn new() -> Self {
         Self { events: Vec::new() }
+    }
+
+    /// Create a Score from a pre-built event list (used by the scene diff system).
+    pub fn from_events(events: Vec<(Time, EventKind)>) -> Self {
+        Self { events }
     }
 
     pub fn note(&mut self, time: Time, note: u8, vel: f32, dur: f32) -> &mut Self {
