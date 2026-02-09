@@ -207,6 +207,16 @@ impl Synth {
         }
     }
 
+    /// Release all active voices. Used at loop boundaries to ensure no notes
+    /// sustain across the loop point.
+    pub fn all_notes_off(&mut self) {
+        for v in &mut self.voices {
+            if v.active {
+                v.env.note_off();
+            }
+        }
+    }
+
     pub fn render_sample(&mut self) -> f32 {
         let dt = 1.0 / self.sample_rate;
 

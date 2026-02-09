@@ -126,6 +126,7 @@ impl Track {
                 let looped = slot.player.advance_loop(sample_idx);
 
                 if looped {
+                    self.synth.all_notes_off();
                     slot.iteration += 1;
                     if let Some(ref mut g) = slot.generator {
                         let beat =
