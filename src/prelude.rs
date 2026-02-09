@@ -12,7 +12,7 @@ pub use crate::score::{b, bar, Score, Tempo, Time};
 pub use crate::waveform::Waveform;
 
 // Effects
-pub use crate::effects::{Chorus, Delay, Distortion, DistortionMode, Effect};
+pub use crate::effects::{Chorus, Delay, DelayMode, Distortion, DistortionMode, Effect, StereoFrame};
 
 // Events
 pub use crate::event::{EventKind, Param};

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::clip::Clip;
+use crate::effects::StereoFrame;
 use crate::patch::Patch;
 use crate::score::{SequencePlayer, Tempo};
 use crate::synth::Synth;
@@ -65,8 +66,9 @@ impl Track {
         }
     }
 
-    /// Render one sample for this track: dispatch events, render synth, apply FX chain, apply gain.
-    pub fn render_sample(&mut self, sample_idx: u64, sample_rate: f32) -> f32 {
+    /// Render one stereo frame for this track: dispatch events, render synth (mono),
+    /// widen to stereo, apply FX chain, apply gain.
+    pub fn render_sample(&mut self, sample_idx: u64, sample_rate: f32) -> StereoFrame {
         // Dispatch clip events
         for slot in self.slots.values_mut() {
             if !slot.active || sample_idx < slot.start_sample {
@@ -84,14 +86,16 @@ impl Track {
             }
         }
 
-        // Render synth
-        let mut sample = self.synth.render_sample();
+        // Render synth (mono) and widen to stereo
+        let mono = self.synth.render_sample();
+        let mut frame: StereoFrame = [mono, mono];
 
-        // Apply FX chain
+        // Apply FX chain (stereo)
         for fx in &mut self.fx_chain {
-            sample = fx.process(sample, sample_rate);
+            frame = fx.process(frame, sample_rate);
         }
 
-        sample * self.gain
+        // Apply gain to both channels
+        [frame[0] * self.gain, frame[1] * self.gain]
     }
 }

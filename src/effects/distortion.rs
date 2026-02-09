@@ -1,4 +1,4 @@
-use crate::effects::Effect;
+use crate::effects::{Effect, StereoFrame};
 
 /// Waveshaping algorithm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,8 +29,8 @@ pub struct Distortion {
     tone: f32,
     /// Post-distortion output gain (linear). Use to tame volume after heavy drive.
     output_gain: f32,
-    // One-pole lowpass state for tone filter
-    tone_z1: f32,
+    // One-pole lowpass state for tone filter (per channel)
+    tone_z1: [f32; 2],
 }
 
 impl Distortion {
@@ -46,7 +46,7 @@ impl Distortion {
             bias: 0.0,
             tone: 1.0,
             output_gain: 1.0,
-            tone_z1: 0.0,
+            tone_z1: [0.0; 2],
         }
     }
 
@@ -81,9 +81,6 @@ impl Distortion {
             DistortionMode::SoftClip => x.tanh(),
             DistortionMode::HardClip => x.clamp(-1.0, 1.0),
             DistortionMode::Tube => {
-                // Asymmetric soft clipping: positive side clips softer than negative.
-                // Models tube amp behavior where one half of the waveform is compressed
-                // more than the other, generating even-order harmonics.
                 if x >= 0.0 {
                     (2.0 * x).tanh() * 0.5
                 } else {
@@ -91,15 +88,11 @@ impl Distortion {
                 }
             }
             DistortionMode::Fuzz => {
-                // Extreme clipping with a sharp sigmoid — nearly square wave at high drive.
-                // The expm1 curve gives a gated, sputtery fuzz character.
                 let sign = x.signum();
                 let abs = x.abs();
                 sign * (1.0 - (-5.0 * abs).exp())
             }
             DistortionMode::Saturate => {
-                // Cubic soft saturation: x - x^3/3 for |x| <= 1, clamped beyond.
-                // Very gentle — good for subtle warming.
                 if x.abs() > 1.0 {
                     x.signum() * (2.0 / 3.0)
                 } else {
@@ -108,34 +101,30 @@ impl Distortion {
             }
         }
     }
+
+    fn process_mono(&self, sample: f32, z1: &mut f32) -> f32 {
+        let driven = self.drive * sample + self.bias;
+        let shaped = self.waveshape(driven) - self.waveshape(self.bias);
+
+        let coeff = (0.001 + self.tone * 0.999).powi(2);
+        *z1 = *z1 + coeff * (shaped - *z1);
+
+        let wet = *z1 * self.output_gain;
+        sample * (1.0 - self.mix) + wet * self.mix
+    }
 }
 
 impl Effect for Distortion {
-    fn process(&mut self, sample: f32, _sample_rate: f32) -> f32 {
-        // Apply drive and bias
-        let driven = self.drive * sample + self.bias;
-
-        // Waveshape
-        let shaped = self.waveshape(driven);
-
-        // Remove the DC offset introduced by bias
-        let shaped = shaped - self.waveshape(self.bias);
-
-        // Tone filter: one-pole lowpass
-        // Map tone 0..1 to coefficient. At tone=1.0 the filter is fully open (no filtering).
-        // At tone=0.0 the cutoff is very low for a dark, fat sound.
-        let coeff = (0.001 + self.tone * 0.999).powi(2);
-        self.tone_z1 = self.tone_z1 + coeff * (shaped - self.tone_z1);
-        let filtered = self.tone_z1;
-
-        // Apply output gain
-        let wet = filtered * self.output_gain;
-
-        // Dry/wet mix
-        sample * (1.0 - self.mix) + wet * self.mix
+    fn process(&mut self, frame: StereoFrame, _sample_rate: f32) -> StereoFrame {
+        // Split out the state to avoid borrow issues
+        let [mut z1_l, mut z1_r] = self.tone_z1;
+        let l = self.process_mono(frame[0], &mut z1_l);
+        let r = self.process_mono(frame[1], &mut z1_r);
+        self.tone_z1 = [z1_l, z1_r];
+        [l, r]
     }
 
     fn reset(&mut self) {
-        self.tone_z1 = 0.0;
+        self.tone_z1 = [0.0; 2];
     }
 }

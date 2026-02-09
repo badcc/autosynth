@@ -71,14 +71,31 @@ impl Session {
         for frame in 0..frames {
             let sample_idx = start_sample + frame as u64;
 
-            let mut mix = 0.0;
+            let mut mix_l = 0.0_f32;
+            let mut mix_r = 0.0_f32;
             for track in self.tracks.values_mut() {
-                mix += track.render_sample(sample_idx, sample_rate);
+                let [l, r] = track.render_sample(sample_idx, sample_rate);
+                mix_l += l;
+                mix_r += r;
             }
 
-            let clamped = mix.clamp(-1.0, 1.0);
-            for ch in 0..channels {
-                output[frame * channels + ch] = clamped;
+            let offset = frame * channels;
+            match channels {
+                1 => {
+                    output[offset] = ((mix_l + mix_r) * 0.5).clamp(-1.0, 1.0);
+                }
+                2 => {
+                    output[offset] = mix_l.clamp(-1.0, 1.0);
+                    output[offset + 1] = mix_r.clamp(-1.0, 1.0);
+                }
+                _ => {
+                    // First two channels get L/R, rest silence
+                    output[offset] = mix_l.clamp(-1.0, 1.0);
+                    output[offset + 1] = mix_r.clamp(-1.0, 1.0);
+                    for ch in 2..channels {
+                        output[offset + ch] = 0.0;
+                    }
+                }
             }
         }
     }
