@@ -1,10 +1,12 @@
 use std::f32::consts::PI;
 
-use crate::envelope::Adsr;
-use crate::event::{EventKind, Param};
-use crate::filter::Svf;
+use crate::automation::OscParam;
+use crate::envelope::{Adsr, RetriggerMode};
+use crate::event::{EventKind, SynthParam};
+use crate::filter::{FilterType, Svf};
 use crate::oscillator::OscillatorState;
 use crate::patch::Patch;
+use crate::waveform::Waveform;
 
 #[derive(Clone, Debug)]
 struct Voice {
@@ -90,21 +92,21 @@ impl Synth {
         }
     }
 
-    pub fn set_param(&mut self, param: Param, val: f32) {
+    pub fn set_param(&mut self, param: SynthParam, val: f32) {
         match param {
-            Param::Attack => self.patch.attack = val.max(0.0),
-            Param::Decay => self.patch.decay = val.max(0.0),
-            Param::Sustain => self.patch.sustain = val.clamp(0.0, 1.0),
-            Param::Release => self.patch.release = val.max(0.0),
-            Param::Cutoff => self.patch.cutoff = val.clamp(20.0, 20000.0),
-            Param::Resonance => self.patch.resonance = val.clamp(0.0, 1.0),
-            Param::LfoRate => self.patch.lfo_rate = val.clamp(0.01, 20.0),
-            Param::LfoDepth => self.patch.lfo_depth = val.clamp(0.0, 1.0),
-            Param::MasterGain => self.patch.master_gain = val.clamp(0.0, 1.0),
+            SynthParam::Attack => self.patch.attack = val.max(0.0),
+            SynthParam::Decay => self.patch.decay = val.max(0.0),
+            SynthParam::Sustain => self.patch.sustain = val.clamp(0.0, 1.0),
+            SynthParam::Release => self.patch.release = val.max(0.0),
+            SynthParam::Cutoff => self.patch.cutoff = val.clamp(20.0, 20000.0),
+            SynthParam::Resonance => self.patch.resonance = val.clamp(0.0, 1.0),
+            SynthParam::LfoRate => self.patch.lfo_rate = val.clamp(0.01, 20.0),
+            SynthParam::LfoDepth => self.patch.lfo_depth = val.clamp(0.0, 1.0),
+            SynthParam::MasterGain => self.patch.master_gain = val.clamp(0.0, 1.0),
         }
         if matches!(
             param,
-            Param::Attack | Param::Decay | Param::Sustain | Param::Release
+            SynthParam::Attack | SynthParam::Decay | SynthParam::Sustain | SynthParam::Release
         ) {
             for v in &mut self.voices {
                 v.env.attack = self.patch.attack;
@@ -112,6 +114,35 @@ impl Synth {
                 v.env.sustain = self.patch.sustain;
                 v.env.release = self.patch.release;
             }
+        }
+    }
+
+    pub fn set_filter_type(&mut self, ft: FilterType) {
+        self.patch.filter_type = ft;
+    }
+
+    pub fn set_retrigger(&mut self, mode: RetriggerMode) {
+        self.patch.retrigger = mode;
+    }
+
+    pub(crate) fn set_osc_param(&mut self, index: usize, param: OscParam, value: f32) {
+        if let Some(osc) = self.patch.oscillators.get_mut(index) {
+            match param {
+                OscParam::Detune => osc.detune_semitones = value,
+                OscParam::Level => osc.level = value,
+            }
+        }
+        for v in &mut self.voices {
+            v.oscillators.set_param(index, param, value);
+        }
+    }
+
+    pub fn set_osc_waveform(&mut self, index: usize, waveform: Waveform) {
+        if let Some(osc) = self.patch.oscillators.get_mut(index) {
+            osc.waveform = waveform;
+        }
+        for v in &mut self.voices {
+            v.oscillators.set_waveform(index, waveform);
         }
     }
 

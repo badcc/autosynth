@@ -33,7 +33,7 @@ fn chords(t: &mut Track) {
 
 fn lead(t: &mut Track) {
     t.osc(Waveform::Sine, 0.5);
-    t.osc(Waveform::Saw, 0.5).set_detune(0.05);
+    t.osc(Waveform::Saw, 0.5).detune(0.05);
     t.gain(0.6);
     t.attack(0.01);
     t.sustain(1.0);

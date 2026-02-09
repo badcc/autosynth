@@ -1,6 +1,9 @@
-use crate::event::EventKind;
+use crate::envelope::RetriggerMode;
+use crate::event::{EventKind, SynthParam};
+use crate::filter::FilterType;
 use crate::pattern::Pattern;
 use crate::score::Time;
+use crate::waveform::Waveform;
 
 // ── Clock: timing context passed to parameter closures ──
 
@@ -24,32 +27,66 @@ impl Clock {
     };
 }
 
-// ── Val: a parameter that is either fixed or clock-driven ──
+// ── Val<T>: a parameter that is either fixed or clock-driven ──
 
-pub enum Val {
-    Fixed(f32),
-    Fn(Box<dyn FnMut(Clock) -> f32 + Send>),
+pub enum Val<T> {
+    Fixed(T),
+    Fn(Box<dyn FnMut(Clock) -> T + Send>),
 }
 
-pub trait IntoVal {
-    fn into_val(self) -> Val;
+pub trait IntoVal<T> {
+    fn into_val(self) -> Val<T>;
 }
 
-impl IntoVal for f32 {
-    fn into_val(self) -> Val {
-        Val::Fixed(self)
-    }
+macro_rules! impl_into_val {
+    ($t:ty) => {
+        impl IntoVal<$t> for $t {
+            fn into_val(self) -> Val<$t> {
+                Val::Fixed(self)
+            }
+        }
+
+        impl<F: FnMut(Clock) -> $t + Send + 'static> IntoVal<$t> for F {
+            fn into_val(self) -> Val<$t> {
+                Val::Fn(Box::new(self))
+            }
+        }
+    };
 }
 
-impl<F: FnMut(Clock) -> f32 + Send + 'static> IntoVal for F {
-    fn into_val(self) -> Val {
-        Val::Fn(Box::new(self))
-    }
+impl_into_val!(f32);
+impl_into_val!(bool);
+impl_into_val!(Waveform);
+impl_into_val!(FilterType);
+impl_into_val!(RetriggerMode);
+
+// ── OscParam: automatable oscillator parameters ──
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OscParam {
+    Detune,
+    Level,
 }
+
+// ── AutoCmd: what an automation closure produces ──
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum AutoCmd {
+    Synth(SynthParam, f32),
+    FilterType(FilterType),
+    Retrigger(RetriggerMode),
+    OscParam { osc_index: usize, param: OscParam, value: f32 },
+    OscWaveform { osc_index: usize, waveform: Waveform },
+    FxParam { fx_index: usize, slot: u8, value: f32 },
+    FxEnabled { fx_index: usize, enabled: bool },
+}
+
+// ── Automation: a closure that produces an AutoCmd ──
+
+pub(crate) type Automation = Box<dyn FnMut(Clock) -> AutoCmd + Send>;
 
 // ── Internal types (audio thread) ──
 
-pub(crate) type AutomationFn = Box<dyn FnMut(Clock) -> f32 + Send>;
 pub(crate) type PatternFn = Box<dyn FnMut(&mut Phrase) + Send>;
 
 // ── Phrase: note builder used inside every() closures ──

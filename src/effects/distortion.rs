@@ -1,5 +1,11 @@
 use crate::effects::{Effect, StereoFrame};
 
+pub const PARAM_DRIVE: u8 = 0;
+pub const PARAM_MIX: u8 = 1;
+pub const PARAM_BIAS: u8 = 2;
+pub const PARAM_TONE: u8 = 3;
+pub const PARAM_OUTPUT: u8 = 4;
+
 /// Waveshaping algorithm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DistortionMode {
@@ -126,5 +132,16 @@ impl Effect for Distortion {
 
     fn reset(&mut self) {
         self.tone_z1 = [0.0; 2];
+    }
+
+    fn set_param(&mut self, slot: u8, value: f32) {
+        match slot {
+            PARAM_DRIVE => self.drive = value.max(0.0),
+            PARAM_MIX => self.mix = value.clamp(0.0, 1.0),
+            PARAM_BIAS => self.bias = value.clamp(-1.0, 1.0),
+            PARAM_TONE => self.tone = value.clamp(0.0, 1.0),
+            PARAM_OUTPUT => self.output_gain = value.max(0.0),
+            _ => {}
+        }
     }
 }

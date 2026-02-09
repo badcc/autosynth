@@ -14,4 +14,7 @@ pub trait Effect: Send {
 
     /// Reset internal state (e.g., on track stop).
     fn reset(&mut self);
+
+    /// Set a numbered parameter slot to a value. Default no-op.
+    fn set_param(&mut self, _slot: u8, _value: f32) {}
 }

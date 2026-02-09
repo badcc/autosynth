@@ -2,6 +2,10 @@ use std::f32::consts::PI;
 
 use crate::effects::{Effect, StereoFrame};
 
+pub const PARAM_RATE: u8 = 0;
+pub const PARAM_DEPTH: u8 = 1;
+pub const PARAM_MIX: u8 = 2;
+
 /// Modulated delay chorus effect.
 pub struct Chorus {
     buffers: [Vec<f32>; 2],
@@ -72,5 +76,14 @@ impl Effect for Chorus {
         self.buffers[1].fill(0.0);
         self.write_pos = 0;
         self.lfo_phase = 0.0;
+    }
+
+    fn set_param(&mut self, slot: u8, value: f32) {
+        match slot {
+            PARAM_RATE => self.rate = value.max(0.01),
+            PARAM_DEPTH => self.depth = value.max(0.0),
+            PARAM_MIX => self.mix = value.clamp(0.0, 1.0),
+            _ => {}
+        }
     }
 }

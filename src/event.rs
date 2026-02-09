@@ -1,7 +1,7 @@
 use crate::patch::Patch;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Param {
+pub enum SynthParam {
     Attack,
     Decay,
     Sustain,
@@ -17,7 +17,7 @@ pub enum Param {
 pub enum EventKind {
     NoteOn { note: u8, vel: f32 },
     NoteOff { note: u8 },
-    Param { param: Param, value: f32 },
+    Param { param: SynthParam, value: f32 },
     SetPatch { patch: Patch },
 }
 

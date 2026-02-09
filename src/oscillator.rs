@@ -1,5 +1,6 @@
 use std::f32::consts::PI;
 
+use crate::automation::OscParam;
 use crate::waveform::Waveform;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,23 +37,6 @@ impl Oscillator {
     }
 
     pub fn phase_offset(mut self, offset: f32) -> Self {
-        self.phase_offset = offset;
-        self
-    }
-
-    // &mut self setters for scene API chaining (osc() returns &mut Oscillator)
-
-    pub fn set_detune(&mut self, semitones: f32) -> &mut Self {
-        self.detune_semitones = semitones;
-        self
-    }
-
-    pub fn set_level(&mut self, level: f32) -> &mut Self {
-        self.level = level;
-        self
-    }
-
-    pub fn set_phase_offset(&mut self, offset: f32) -> &mut Self {
         self.phase_offset = offset;
         self
     }
@@ -100,6 +84,21 @@ impl OscillatorState {
     pub(crate) fn set_configs(&mut self, configs: Vec<Oscillator>) {
         self.phases = configs.iter().map(|c| c.phase_offset).collect();
         self.configs = configs;
+    }
+
+    pub(crate) fn set_param(&mut self, index: usize, param: OscParam, value: f32) {
+        if let Some(config) = self.configs.get_mut(index) {
+            match param {
+                OscParam::Detune => config.detune_semitones = value,
+                OscParam::Level => config.level = value,
+            }
+        }
+    }
+
+    pub(crate) fn set_waveform(&mut self, index: usize, waveform: Waveform) {
+        if let Some(config) = self.configs.get_mut(index) {
+            config.waveform = waveform;
+        }
     }
 }
 

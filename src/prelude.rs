@@ -1,7 +1,7 @@
 // ── Scene API (primary) ──
 pub use crate::automation::{Clock, IntoVal, Phrase};
 pub use crate::live::live;
-pub use crate::scene::{Scene, SceneTrack as Track};
+pub use crate::scene::{OscBuilder, Scene, SceneTrack as Track};
 
 // ── Composition ──
 pub use crate::envelope::RetriggerMode;

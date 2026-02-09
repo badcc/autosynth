@@ -1,6 +1,6 @@
-use crate::automation::{AutomationFn, Clock, PatternFn, Phrase};
+use crate::automation::{AutoCmd, Automation, Clock, PatternFn, Phrase};
 use crate::effects::StereoFrame;
-use crate::event::{Event, Param};
+use crate::event::Event;
 use crate::patch::Patch;
 use crate::score::{time_to_sample, Score, SequencePlayer, Tempo};
 use crate::synth::Synth;
@@ -41,7 +41,8 @@ pub struct Track {
     slot: Option<ClipSlot>,
     pub gain: f32,
     pub(crate) fx_chain: Vec<Box<dyn crate::effects::Effect>>,
-    pub(crate) automations: Vec<(Param, AutomationFn)>,
+    pub(crate) fx_enabled: Vec<bool>,
+    pub(crate) automations: Vec<Automation>,
     sample_rate: f32,
     loop_beats: Option<f32>,
     last_automation_tick: u64,
@@ -54,6 +55,7 @@ impl Track {
             slot: None,
             gain: 1.0,
             fx_chain: Vec::new(),
+            fx_enabled: Vec::new(),
             automations: Vec::new(),
             sample_rate,
             loop_beats: None,
@@ -108,7 +110,7 @@ impl Track {
         }
     }
 
-    pub fn set_automations(&mut self, automations: Vec<(Param, AutomationFn)>) {
+    pub(crate) fn set_automations(&mut self, automations: Vec<Automation>) {
         self.automations = automations;
         self.last_automation_tick = u64::MAX;
     }
@@ -157,8 +159,34 @@ impl Track {
                 local,
                 iteration,
             };
-            for (param, func) in &mut self.automations {
-                self.synth.set_param(*param, func(clock));
+            for auto in &mut self.automations {
+                match auto(clock) {
+                    AutoCmd::Synth(param, value) => {
+                        self.synth.set_param(param, value);
+                    }
+                    AutoCmd::FilterType(ft) => {
+                        self.synth.set_filter_type(ft);
+                    }
+                    AutoCmd::Retrigger(mode) => {
+                        self.synth.set_retrigger(mode);
+                    }
+                    AutoCmd::OscParam { osc_index, param, value } => {
+                        self.synth.set_osc_param(osc_index, param, value);
+                    }
+                    AutoCmd::OscWaveform { osc_index, waveform } => {
+                        self.synth.set_osc_waveform(osc_index, waveform);
+                    }
+                    AutoCmd::FxParam { fx_index, slot, value } => {
+                        if let Some(fx) = self.fx_chain.get_mut(fx_index) {
+                            fx.set_param(slot, value);
+                        }
+                    }
+                    AutoCmd::FxEnabled { fx_index, enabled } => {
+                        if let Some(e) = self.fx_enabled.get_mut(fx_index) {
+                            *e = enabled;
+                        }
+                    }
+                }
             }
         }
 
@@ -166,9 +194,11 @@ impl Track {
         let mono = self.synth.render_sample();
         let mut frame: StereoFrame = [mono, mono];
 
-        // Apply FX chain (stereo)
-        for fx in &mut self.fx_chain {
-            frame = fx.process(frame, sample_rate);
+        // Apply FX chain (stereo), skipping disabled effects
+        for (i, fx) in self.fx_chain.iter_mut().enumerate() {
+            if self.fx_enabled.get(i).copied().unwrap_or(true) {
+                frame = fx.process(frame, sample_rate);
+            }
         }
 
         [frame[0] * self.gain, frame[1] * self.gain]

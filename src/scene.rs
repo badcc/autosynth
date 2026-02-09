@@ -3,11 +3,11 @@ use std::collections::{HashMap, HashSet};
 
 use subsecond::{HotFn, HotFnPtr};
 
-use crate::automation::{AutomationFn, Clock, IntoVal, PatternFn, Phrase, Val};
+use crate::automation::{AutoCmd, Automation, Clock, IntoVal, OscParam, PatternFn, Phrase, Val};
 use crate::effect_config::EffectConfig;
 use crate::engine::EngineHandle;
 use crate::envelope::RetriggerMode;
-use crate::event::Param;
+use crate::event::SynthParam;
 use crate::filter::FilterType;
 use crate::oscillator::Oscillator;
 use crate::patch::Patch;
@@ -122,10 +122,11 @@ pub struct SceneTrack {
     patch: Patch,
     polyphony: usize,
     effects: Vec<EffectConfig>,
+    fx_enabled: Vec<bool>,
     phrase: Phrase,
     loop_beats: Option<f32>,
     pattern_fn: Option<PatternFn>,
-    automations: Vec<(Param, AutomationFn)>,
+    automations: Vec<Automation>,
     oscs_set: bool,
 }
 
@@ -135,6 +136,7 @@ impl SceneTrack {
             patch: Patch::new(),
             polyphony: 8,
             effects: Vec::new(),
+            fx_enabled: Vec::new(),
             phrase: Phrase::new(),
             loop_beats: None,
             pattern_fn: None,
@@ -149,6 +151,7 @@ impl SceneTrack {
             patch,
             polyphony,
             effects,
+            fx_enabled,
             phrase,
             loop_beats,
             pattern_fn,
@@ -160,6 +163,10 @@ impl SceneTrack {
 
         for effect in &effects {
             handle.add_effect_boxed(name, effect.build(bpm, sr));
+        }
+
+        if !fx_enabled.is_empty() {
+            handle.set_fx_enabled(name, fx_enabled);
         }
 
         // Looping pattern via every()
@@ -182,7 +189,8 @@ impl SceneTrack {
     // ── Oscillator config ──
 
     /// Add an oscillator. First call clears the default oscillators.
-    pub fn osc(&mut self, waveform: Waveform, level: f32) -> &mut Oscillator {
+    /// Returns an `OscBuilder` for setting detune, level, waveform automations.
+    pub fn osc(&mut self, waveform: Waveform, level: f32) -> OscBuilder<'_> {
         if !self.oscs_set {
             self.patch.oscillators.clear();
             self.oscs_set = true;
@@ -190,109 +198,125 @@ impl SceneTrack {
         self.patch
             .oscillators
             .push(Oscillator::new(waveform).level(level));
-        self.patch.oscillators.last_mut().unwrap()
+        let osc_index = self.patch.oscillators.len() - 1;
+        OscBuilder {
+            track: self,
+            osc_index,
+        }
     }
 
-    // ── Patch parameters (accept static f32 or |beat| -> f32 closures) ──
+    // ── Patch parameters (accept static or closure) ──
 
-    pub fn gain(&mut self, v: impl IntoVal) {
+    pub fn gain(&mut self, v: impl IntoVal<f32>) {
         match v.into_val() {
             Val::Fixed(f) => self.patch.master_gain = f,
             Val::Fn(mut f) => {
                 self.patch.master_gain = f(Clock::ZERO);
-                self.automations.push((Param::MasterGain, f));
+                self.automations.push(Box::new(move |c| AutoCmd::Synth(SynthParam::MasterGain, f(c))));
             }
         }
     }
 
-    pub fn attack(&mut self, v: impl IntoVal) {
+    pub fn attack(&mut self, v: impl IntoVal<f32>) {
         match v.into_val() {
             Val::Fixed(f) => self.patch.attack = f,
             Val::Fn(mut f) => {
                 self.patch.attack = f(Clock::ZERO);
-                self.automations.push((Param::Attack, f));
+                self.automations.push(Box::new(move |c| AutoCmd::Synth(SynthParam::Attack, f(c))));
             }
         }
     }
 
-    pub fn decay(&mut self, v: impl IntoVal) {
+    pub fn decay(&mut self, v: impl IntoVal<f32>) {
         match v.into_val() {
             Val::Fixed(f) => self.patch.decay = f,
             Val::Fn(mut f) => {
                 self.patch.decay = f(Clock::ZERO);
-                self.automations.push((Param::Decay, f));
+                self.automations.push(Box::new(move |c| AutoCmd::Synth(SynthParam::Decay, f(c))));
             }
         }
     }
 
-    pub fn sustain(&mut self, v: impl IntoVal) {
+    pub fn sustain(&mut self, v: impl IntoVal<f32>) {
         match v.into_val() {
             Val::Fixed(f) => self.patch.sustain = f,
             Val::Fn(mut f) => {
                 self.patch.sustain = f(Clock::ZERO);
-                self.automations.push((Param::Sustain, f));
+                self.automations.push(Box::new(move |c| AutoCmd::Synth(SynthParam::Sustain, f(c))));
             }
         }
     }
 
-    pub fn release(&mut self, v: impl IntoVal) {
+    pub fn release(&mut self, v: impl IntoVal<f32>) {
         match v.into_val() {
             Val::Fixed(f) => self.patch.release = f,
             Val::Fn(mut f) => {
                 self.patch.release = f(Clock::ZERO);
-                self.automations.push((Param::Release, f));
+                self.automations.push(Box::new(move |c| AutoCmd::Synth(SynthParam::Release, f(c))));
             }
         }
     }
 
-    pub fn cutoff(&mut self, v: impl IntoVal) {
+    pub fn cutoff(&mut self, v: impl IntoVal<f32>) {
         match v.into_val() {
             Val::Fixed(f) => self.patch.cutoff = f,
             Val::Fn(mut f) => {
                 self.patch.cutoff = f(Clock::ZERO);
-                self.automations.push((Param::Cutoff, f));
+                self.automations.push(Box::new(move |c| AutoCmd::Synth(SynthParam::Cutoff, f(c))));
             }
         }
     }
 
-    pub fn resonance(&mut self, v: impl IntoVal) {
+    pub fn resonance(&mut self, v: impl IntoVal<f32>) {
         match v.into_val() {
             Val::Fixed(f) => self.patch.resonance = f,
             Val::Fn(mut f) => {
                 self.patch.resonance = f(Clock::ZERO);
-                self.automations.push((Param::Resonance, f));
+                self.automations.push(Box::new(move |c| AutoCmd::Synth(SynthParam::Resonance, f(c))));
             }
         }
     }
 
-    pub fn lfo_rate(&mut self, v: impl IntoVal) {
+    pub fn lfo_rate(&mut self, v: impl IntoVal<f32>) {
         match v.into_val() {
             Val::Fixed(f) => self.patch.lfo_rate = f,
             Val::Fn(mut f) => {
                 self.patch.lfo_rate = f(Clock::ZERO);
-                self.automations.push((Param::LfoRate, f));
+                self.automations.push(Box::new(move |c| AutoCmd::Synth(SynthParam::LfoRate, f(c))));
             }
         }
     }
 
-    pub fn lfo_depth(&mut self, v: impl IntoVal) {
+    pub fn lfo_depth(&mut self, v: impl IntoVal<f32>) {
         match v.into_val() {
             Val::Fixed(f) => self.patch.lfo_depth = f,
             Val::Fn(mut f) => {
                 self.patch.lfo_depth = f(Clock::ZERO);
-                self.automations.push((Param::LfoDepth, f));
+                self.automations.push(Box::new(move |c| AutoCmd::Synth(SynthParam::LfoDepth, f(c))));
             }
         }
     }
 
-    // ── Non-automatable params (discrete values) ──
+    // ── Discrete params (now automatable) ──
 
-    pub fn filter_type(&mut self, v: FilterType) {
-        self.patch.filter_type = v;
+    pub fn filter_type(&mut self, v: impl IntoVal<FilterType>) {
+        match v.into_val() {
+            Val::Fixed(ft) => self.patch.filter_type = ft,
+            Val::Fn(mut f) => {
+                self.patch.filter_type = f(Clock::ZERO);
+                self.automations.push(Box::new(move |c| AutoCmd::FilterType(f(c))));
+            }
+        }
     }
 
-    pub fn retrigger(&mut self, v: RetriggerMode) {
-        self.patch.retrigger = v;
+    pub fn retrigger(&mut self, v: impl IntoVal<RetriggerMode>) {
+        match v.into_val() {
+            Val::Fixed(m) => self.patch.retrigger = m,
+            Val::Fn(mut f) => {
+                self.patch.retrigger = f(Clock::ZERO);
+                self.automations.push(Box::new(move |c| AutoCmd::Retrigger(f(c))));
+            }
+        }
     }
 
     pub fn polyphony(&mut self, n: usize) {
@@ -302,22 +326,58 @@ impl SceneTrack {
     // ── Effects ──
 
     pub fn delay(&mut self, f: impl FnOnce(&mut crate::effect_config::DelayBuilder)) {
+        let fx_index = self.effects.len();
         let mut b = crate::effect_config::DelayBuilder::new();
         f(&mut b);
+        let enabled = b.initial_enabled();
+        let param_autos = b.take_automations();
+        let enabled_auto = b.take_enabled_auto();
         self.effects.push(EffectConfig::Delay(b.into_config()));
+        self.fx_enabled.push(enabled);
+        self.collect_fx_automations(fx_index, param_autos, enabled_auto);
     }
 
     pub fn distortion(&mut self, f: impl FnOnce(&mut crate::effect_config::DistortionBuilder)) {
+        let fx_index = self.effects.len();
         let mut b = crate::effect_config::DistortionBuilder::new();
         f(&mut b);
+        let enabled = b.initial_enabled();
+        let param_autos = b.take_automations();
+        let enabled_auto = b.take_enabled_auto();
         self.effects
             .push(EffectConfig::Distortion(b.into_config()));
+        self.fx_enabled.push(enabled);
+        self.collect_fx_automations(fx_index, param_autos, enabled_auto);
     }
 
     pub fn chorus(&mut self, f: impl FnOnce(&mut crate::effect_config::ChorusBuilder)) {
+        let fx_index = self.effects.len();
         let mut b = crate::effect_config::ChorusBuilder::new();
         f(&mut b);
+        let enabled = b.initial_enabled();
+        let param_autos = b.take_automations();
+        let enabled_auto = b.take_enabled_auto();
         self.effects.push(EffectConfig::Chorus(b.into_config()));
+        self.fx_enabled.push(enabled);
+        self.collect_fx_automations(fx_index, param_autos, enabled_auto);
+    }
+
+    fn collect_fx_automations(
+        &mut self,
+        fx_index: usize,
+        param_autos: Vec<(u8, Box<dyn FnMut(Clock) -> f32 + Send>)>,
+        enabled_auto: Option<Box<dyn FnMut(Clock) -> bool + Send>>,
+    ) {
+        for (slot, mut closure) in param_autos {
+            self.automations.push(Box::new(move |c| {
+                AutoCmd::FxParam { fx_index, slot, value: closure(c) }
+            }));
+        }
+        if let Some(mut ef) = enabled_auto {
+            self.automations.push(Box::new(move |c| {
+                AutoCmd::FxEnabled { fx_index, enabled: ef(c) }
+            }));
+        }
     }
 
     // ── Looping pattern ──
@@ -355,5 +415,67 @@ impl SceneTrack {
 
     pub fn fx(&mut self, f: fn(&mut SceneTrack)) {
         f(self);
+    }
+}
+
+// ── OscBuilder: returned by SceneTrack::osc() ──
+
+pub struct OscBuilder<'a> {
+    track: &'a mut SceneTrack,
+    osc_index: usize,
+}
+
+impl<'a> OscBuilder<'a> {
+    pub fn detune(self, v: impl IntoVal<f32>) -> Self {
+        match v.into_val() {
+            Val::Fixed(f) => {
+                self.track.patch.oscillators[self.osc_index].detune_semitones = f;
+            }
+            Val::Fn(mut f) => {
+                self.track.patch.oscillators[self.osc_index].detune_semitones = f(Clock::ZERO);
+                let idx = self.osc_index;
+                self.track.automations.push(Box::new(move |c| {
+                    AutoCmd::OscParam { osc_index: idx, param: OscParam::Detune, value: f(c) }
+                }));
+            }
+        }
+        self
+    }
+
+    pub fn level(self, v: impl IntoVal<f32>) -> Self {
+        match v.into_val() {
+            Val::Fixed(f) => {
+                self.track.patch.oscillators[self.osc_index].level = f;
+            }
+            Val::Fn(mut f) => {
+                self.track.patch.oscillators[self.osc_index].level = f(Clock::ZERO);
+                let idx = self.osc_index;
+                self.track.automations.push(Box::new(move |c| {
+                    AutoCmd::OscParam { osc_index: idx, param: OscParam::Level, value: f(c) }
+                }));
+            }
+        }
+        self
+    }
+
+    pub fn waveform(self, v: impl IntoVal<Waveform>) -> Self {
+        match v.into_val() {
+            Val::Fixed(w) => {
+                self.track.patch.oscillators[self.osc_index].waveform = w;
+            }
+            Val::Fn(mut f) => {
+                self.track.patch.oscillators[self.osc_index].waveform = f(Clock::ZERO);
+                let idx = self.osc_index;
+                self.track.automations.push(Box::new(move |c| {
+                    AutoCmd::OscWaveform { osc_index: idx, waveform: f(c) }
+                }));
+            }
+        }
+        self
+    }
+
+    pub fn phase_offset(self, offset: f32) -> Self {
+        self.track.patch.oscillators[self.osc_index].phase_offset = offset;
+        self
     }
 }

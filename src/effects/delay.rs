@@ -1,5 +1,8 @@
 use crate::effects::{Effect, StereoFrame};
 
+pub const PARAM_FEEDBACK: u8 = 0;
+pub const PARAM_MIX: u8 = 1;
+
 /// Delay feedback routing mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DelayMode {
@@ -99,5 +102,13 @@ impl Effect for Delay {
         self.buffers[0].fill(0.0);
         self.buffers[1].fill(0.0);
         self.write_pos = 0;
+    }
+
+    fn set_param(&mut self, slot: u8, value: f32) {
+        match slot {
+            PARAM_FEEDBACK => self.feedback = value.clamp(0.0, 0.95),
+            PARAM_MIX => self.mix = value.clamp(0.0, 1.0),
+            _ => {}
+        }
     }
 }

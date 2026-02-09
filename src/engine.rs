@@ -1,12 +1,12 @@
 use std::sync::mpsc;
 
-use crate::automation::{AutomationFn, PatternFn};
-use crate::event::Param;
+use crate::automation::{Automation, PatternFn};
+use crate::event::SynthParam;
 use crate::patch::Patch;
 use crate::score::{Score, Tempo};
 use crate::session::Session;
 
-pub enum Command {
+pub(crate) enum Command {
     // Track management
     AddTrack {
         name: String,
@@ -32,14 +32,14 @@ pub enum Command {
     },
     SetParam {
         track: String,
-        param: Param,
+        param: SynthParam,
         value: f32,
     },
 
     // Automations (track-scoped)
     SetAutomations {
         track: String,
-        automations: Vec<(Param, AutomationFn)>,
+        automations: Vec<Automation>,
     },
 
     // Effects (track-scoped)
@@ -48,6 +48,10 @@ pub enum Command {
         effect: Box<dyn crate::effects::Effect>,
     },
     ClearEffects(String),
+    SetFxEnabled {
+        track: String,
+        enabled: Vec<bool>,
+    },
 
     // Global
     SetTempo(Tempo),
@@ -112,7 +116,7 @@ impl EngineHandle {
         });
     }
 
-    pub fn set_param(&self, track: &str, param: Param, value: f32) {
+    pub fn set_param(&self, track: &str, param: SynthParam, value: f32) {
         let _ = self.tx.send(Command::SetParam {
             track: track.to_string(),
             param,
@@ -120,7 +124,7 @@ impl EngineHandle {
         });
     }
 
-    pub fn set_automations(&self, track: &str, automations: Vec<(Param, AutomationFn)>) {
+    pub(crate) fn set_automations(&self, track: &str, automations: Vec<Automation>) {
         let _ = self.tx.send(Command::SetAutomations {
             track: track.to_string(),
             automations,
@@ -143,6 +147,13 @@ impl EngineHandle {
 
     pub fn clear_effects(&self, track: &str) {
         let _ = self.tx.send(Command::ClearEffects(track.to_string()));
+    }
+
+    pub(crate) fn set_fx_enabled(&self, track: &str, enabled: Vec<bool>) {
+        let _ = self.tx.send(Command::SetFxEnabled {
+            track: track.to_string(),
+            enabled,
+        });
     }
 
     pub fn set_tempo(&self, tempo: Tempo) {
@@ -259,11 +270,18 @@ impl Engine {
             Command::AddEffect { track, effect } => {
                 if let Some(t) = self.session.track_mut(&track) {
                     t.fx_chain.push(effect);
+                    t.fx_enabled.push(true);
                 }
             }
             Command::ClearEffects(track) => {
                 if let Some(t) = self.session.track_mut(&track) {
                     t.fx_chain.clear();
+                    t.fx_enabled.clear();
+                }
+            }
+            Command::SetFxEnabled { track, enabled } => {
+                if let Some(t) = self.session.track_mut(&track) {
+                    t.fx_enabled = enabled;
                 }
             }
             Command::SetTempo(tempo) => {
