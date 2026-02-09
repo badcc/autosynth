@@ -25,7 +25,7 @@ pub fn live(bpm: f32, scene_fn: fn(&mut Scene)) -> Result<()> {
         .context("Failed to build audio stream")?;
     stream.play()?;
 
-    println!("rustsynth live @ {bpm} BPM — Ctrl+C to stop");
+    println!("autosynth live @ {bpm} BPM — Ctrl+C to stop");
 
     let mut scene = Scene::new(bpm, sample_rate, handle);
 

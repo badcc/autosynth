@@ -1,8 +1,8 @@
 use anyhow::Result;
-use rustsynth::prelude::*;
+use autosynth::prelude::*;
 
 fn main() -> Result<()> {
-    rustsynth::live(120.0, scene)
+    autosynth::live(120.0, scene)
 }
 
 fn scene(s: &mut Scene) {
