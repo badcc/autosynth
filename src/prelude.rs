@@ -3,6 +3,7 @@ pub use crate::engine::{Engine, EngineHandle};
 
 // Composition
 pub use crate::clip::Clip;
+pub use crate::envelope::RetriggerMode;
 pub use crate::filter::FilterType;
 pub use crate::oscillator::Oscillator;
 pub use crate::patch::Patch;
@@ -11,7 +12,7 @@ pub use crate::score::{b, bar, Score, Tempo, Time};
 pub use crate::waveform::Waveform;
 
 // Effects
-pub use crate::effects::{Chorus, Delay, Distortion, Effect};
+pub use crate::effects::{Chorus, Delay, Distortion, DistortionMode, Effect};
 
 // Events
 pub use crate::event::{EventKind, Param};

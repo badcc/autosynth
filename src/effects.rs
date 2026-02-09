@@ -4,7 +4,7 @@ pub mod distortion;
 
 pub use chorus::Chorus;
 pub use delay::Delay;
-pub use distortion::Distortion;
+pub use distortion::{Distortion, DistortionMode};
 
 pub trait Effect: Send {
     /// Process a single sample (mono). Called per-sample in the render loop.

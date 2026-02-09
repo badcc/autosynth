@@ -1,3 +1,4 @@
+use crate::envelope::RetriggerMode;
 use crate::filter::FilterType;
 use crate::oscillator::Oscillator;
 use crate::waveform::Waveform;
@@ -15,6 +16,7 @@ pub struct Patch {
     pub decay: f32,
     pub sustain: f32,
     pub release: f32,
+    pub retrigger: RetriggerMode,
 }
 
 impl Default for Patch {
@@ -43,6 +45,7 @@ impl Patch {
             decay: 0.2,
             sustain: 0.7,
             release: 0.3,
+            retrigger: RetriggerMode::default(),
         }
     }
 
@@ -103,6 +106,11 @@ impl Patch {
 
     pub fn release(mut self, v: f32) -> Self {
         self.release = v;
+        self
+    }
+
+    pub fn retrigger(mut self, mode: RetriggerMode) -> Self {
+        self.retrigger = mode;
         self
     }
 }

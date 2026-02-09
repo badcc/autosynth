@@ -135,18 +135,37 @@ impl Synth {
             });
 
         let v = &mut self.voices[idx];
+        let was_active = v.active;
         v.active = true;
         v.note = note;
         v.velocity = vel;
-        v.oscillators.set_configs(self.patch.oscillators.clone());
-        v.oscillators.reset();
-        v.filter.reset();
-        v.env.attack = self.patch.attack;
-        v.env.decay = self.patch.decay;
-        v.env.sustain = self.patch.sustain;
-        v.env.release = self.patch.release;
-        v.env.note_on();
         v.last_used = self.clock;
+
+        if was_active {
+            // Voice stealing or same-note retrigger — defer to RetriggerMode.
+            // Hard resets oscillators/filter; Soft and Legato preserve phase continuity.
+            let hard_reset = v.env.retrigger(self.patch.retrigger);
+            if hard_reset {
+                v.oscillators.set_configs(self.patch.oscillators.clone());
+                v.oscillators.reset();
+                v.filter.reset();
+            }
+            // Always sync envelope timing so the retrigger uses current ADSR values.
+            v.env.attack = self.patch.attack;
+            v.env.decay = self.patch.decay;
+            v.env.sustain = self.patch.sustain;
+            v.env.release = self.patch.release;
+        } else {
+            // Fresh voice — always start clean.
+            v.oscillators.set_configs(self.patch.oscillators.clone());
+            v.oscillators.reset();
+            v.filter.reset();
+            v.env.attack = self.patch.attack;
+            v.env.decay = self.patch.decay;
+            v.env.sustain = self.patch.sustain;
+            v.env.release = self.patch.release;
+            v.env.note_on();
+        }
     }
 
     pub fn note_off(&mut self, note: u8) {
