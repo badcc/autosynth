@@ -3,16 +3,17 @@ use std::collections::{HashMap, HashSet};
 
 use subsecond::{HotFn, HotFnPtr};
 
-use crate::diff;
+use crate::automation::{AutomationFn, IntoVal, PatternFn, Val};
+use crate::clip::Clip;
 use crate::effect_config::EffectConfig;
 use crate::engine::EngineHandle;
 use crate::envelope::RetriggerMode;
-use crate::event::EventKind;
+use crate::event::{EventKind, Param};
 use crate::filter::FilterType;
 use crate::oscillator::Oscillator;
 use crate::patch::Patch;
 use crate::pattern::Pattern;
-use crate::score::{Tempo, Time};
+use crate::score::{Score, Time};
 use crate::waveform::Waveform;
 
 // ── Identity ──
@@ -35,36 +36,13 @@ fn short_name<F: 'static>() -> String {
         .to_string()
 }
 
-// ── Description types (diffable snapshots) ──
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct TrackDesc {
-    pub patch: Patch,
-    pub polyphony: usize,
-    pub effects: Vec<EffectConfig>,
-    pub events: Vec<(Time, EventKind)>,
-    pub loop_beats: Option<f32>,
-}
-
-impl Default for TrackDesc {
-    fn default() -> Self {
-        Self {
-            patch: Patch::new(),
-            polyphony: 8,
-            effects: Vec::new(),
-            events: Vec::new(),
-            loop_beats: None,
-        }
-    }
-}
-
 // ── Scene (stateful, long-lived) ──
 
 pub struct Scene {
     bpm: f32,
     sample_rate: f32,
     handle: EngineHandle,
-    tracks: HashMap<TrackId, (String, TrackDesc)>,
+    names: HashMap<TrackId, String>,
     ptrs: HashMap<TrackId, HotFnPtr>,
     seen: HashSet<TrackId>,
 }
@@ -75,7 +53,7 @@ impl Scene {
             bpm,
             sample_rate,
             handle,
-            tracks: HashMap::new(),
+            names: HashMap::new(),
             ptrs: HashMap::new(),
             seen: HashSet::new(),
         }
@@ -84,13 +62,12 @@ impl Scene {
     pub fn tempo(&mut self, bpm: f32) {
         if self.bpm != bpm {
             self.bpm = bpm;
-            self.handle.set_tempo(Tempo::new(bpm));
+            self.handle.set_tempo(crate::score::Tempo::new(bpm));
         }
     }
 
     /// Register a track. The function IS the identity.
-    /// F is typically a named fn item like `chords` — its TypeId is stable.
-    /// Uses HotFn ptr_address to skip unchanged tracks between patches.
+    /// On hot-reload (ptr changed), tears down and rebuilds the track entirely.
     pub fn track<F: Fn(&mut SceneTrack) + 'static>(&mut self, f: F) {
         let id = TrackId::of::<F>();
         self.seen.insert(id);
@@ -101,42 +78,37 @@ impl Scene {
 
         if let Some(old_ptr) = self.ptrs.get(&id) {
             if *old_ptr == ptr {
-                // Function unchanged — skip entirely
                 return;
             }
         }
 
-        // Function changed (or new track) — evaluate it
+        // Function changed (or new track) — evaluate and rebuild
         self.ptrs.insert(id, ptr);
 
         let name = short_name::<F>();
         let mut builder = SceneTrack::new();
         hot.call((&mut builder,));
-        let new_desc = builder.into_desc();
 
-        if let Some((_, old_desc)) = self.tracks.get(&id) {
-            // Existing track — diff
-            diff::diff_track(&self.handle, &name, old_desc, &new_desc, self.bpm, self.sample_rate);
-        } else {
-            // New track — create from scratch
-            diff::add_track(&self.handle, &name, &new_desc, self.bpm, self.sample_rate);
+        // Tear down old track if it exists
+        if self.names.contains_key(&id) {
+            self.handle.remove_track(&name);
         }
 
-        self.tracks.insert(id, (name, new_desc));
+        builder.send(&self.handle, &name, self.bpm, self.sample_rate);
+        self.names.insert(id, name);
     }
 
     /// Call after all track() calls in a frame to detect removed tracks.
     pub fn finish_frame(&mut self) {
-        // Remove tracks not seen this frame
         let removed: Vec<TrackId> = self
-            .tracks
+            .names
             .keys()
             .filter(|id| !self.seen.contains(id))
             .copied()
             .collect();
 
         for id in removed {
-            if let Some((name, _)) = self.tracks.remove(&id) {
+            if let Some(name) = self.names.remove(&id) {
                 self.handle.remove_track(&name);
             }
             self.ptrs.remove(&id);
@@ -149,86 +121,184 @@ impl Scene {
 // ── Track builder (user-facing, re-exported as `Track` in prelude) ──
 
 pub struct SceneTrack {
-    desc: TrackDesc,
+    patch: Patch,
+    polyphony: usize,
+    effects: Vec<EffectConfig>,
+    events: Vec<(Time, EventKind)>,
+    loop_beats: Option<f32>,
+    pattern_fn: Option<PatternFn>,
+    automations: Vec<(Param, AutomationFn)>,
     oscs_set: bool,
 }
 
 impl SceneTrack {
     fn new() -> Self {
         Self {
-            desc: TrackDesc::default(),
+            patch: Patch::new(),
+            polyphony: 8,
+            effects: Vec::new(),
+            events: Vec::new(),
+            loop_beats: None,
+            pattern_fn: None,
+            automations: Vec::new(),
             oscs_set: false,
         }
     }
 
-    fn into_desc(self) -> TrackDesc {
-        self.desc
+    /// Send all track state to the audio thread via commands.
+    fn send(self, handle: &EngineHandle, name: &str, bpm: f32, sr: f32) {
+        let SceneTrack {
+            patch,
+            polyphony,
+            effects,
+            events,
+            loop_beats,
+            pattern_fn,
+            automations,
+            oscs_set: _,
+        } = self;
+
+        handle.add_track_with_polyphony(name, patch, polyphony);
+
+        for effect in &effects {
+            handle.add_effect_boxed(name, effect.build(bpm, sr));
+        }
+
+        // Looping pattern via every()
+        if let Some(pf) = pattern_fn {
+            let clip = Clip::looped("live", loop_beats.unwrap());
+            handle.launch_with_pattern(name, clip, pf);
+        }
+        // One-shot notes (no every())
+        else if !events.is_empty() {
+            let mut clip = Clip::new("live");
+            clip.score = Score::from_events(events);
+            handle.launch(name, clip);
+        }
+
+        if !automations.is_empty() {
+            handle.set_automations(name, automations);
+        }
     }
 
     // ── Oscillator config ──
 
     /// Add an oscillator. First call clears the default oscillators.
-    /// Returns &mut Oscillator for chaining (.set_detune(), .set_phase_offset()).
     pub fn osc(&mut self, waveform: Waveform, level: f32) -> &mut Oscillator {
         if !self.oscs_set {
-            self.desc.patch.oscillators.clear();
+            self.patch.oscillators.clear();
             self.oscs_set = true;
         }
-        self.desc
-            .patch
+        self.patch
             .oscillators
             .push(Oscillator::new(waveform).level(level));
-        self.desc.patch.oscillators.last_mut().unwrap()
+        self.patch.oscillators.last_mut().unwrap()
     }
 
-    // ── Patch parameters (direct setters) ──
+    // ── Patch parameters (accept static f32 or |beat| -> f32 closures) ──
 
-    pub fn gain(&mut self, v: f32) {
-        self.desc.patch.master_gain = v;
+    pub fn gain(&mut self, v: impl IntoVal) {
+        match v.into_val() {
+            Val::Fixed(f) => self.patch.master_gain = f,
+            Val::Fn(mut f) => {
+                self.patch.master_gain = f(0.0);
+                self.automations.push((Param::MasterGain, f));
+            }
+        }
     }
 
-    pub fn attack(&mut self, v: f32) {
-        self.desc.patch.attack = v;
+    pub fn attack(&mut self, v: impl IntoVal) {
+        match v.into_val() {
+            Val::Fixed(f) => self.patch.attack = f,
+            Val::Fn(mut f) => {
+                self.patch.attack = f(0.0);
+                self.automations.push((Param::Attack, f));
+            }
+        }
     }
 
-    pub fn decay(&mut self, v: f32) {
-        self.desc.patch.decay = v;
+    pub fn decay(&mut self, v: impl IntoVal) {
+        match v.into_val() {
+            Val::Fixed(f) => self.patch.decay = f,
+            Val::Fn(mut f) => {
+                self.patch.decay = f(0.0);
+                self.automations.push((Param::Decay, f));
+            }
+        }
     }
 
-    pub fn sustain(&mut self, v: f32) {
-        self.desc.patch.sustain = v;
+    pub fn sustain(&mut self, v: impl IntoVal) {
+        match v.into_val() {
+            Val::Fixed(f) => self.patch.sustain = f,
+            Val::Fn(mut f) => {
+                self.patch.sustain = f(0.0);
+                self.automations.push((Param::Sustain, f));
+            }
+        }
     }
 
-    pub fn release(&mut self, v: f32) {
-        self.desc.patch.release = v;
+    pub fn release(&mut self, v: impl IntoVal) {
+        match v.into_val() {
+            Val::Fixed(f) => self.patch.release = f,
+            Val::Fn(mut f) => {
+                self.patch.release = f(0.0);
+                self.automations.push((Param::Release, f));
+            }
+        }
     }
 
-    pub fn cutoff(&mut self, v: f32) {
-        self.desc.patch.cutoff = v;
+    pub fn cutoff(&mut self, v: impl IntoVal) {
+        match v.into_val() {
+            Val::Fixed(f) => self.patch.cutoff = f,
+            Val::Fn(mut f) => {
+                self.patch.cutoff = f(0.0);
+                self.automations.push((Param::Cutoff, f));
+            }
+        }
     }
 
-    pub fn resonance(&mut self, v: f32) {
-        self.desc.patch.resonance = v;
+    pub fn resonance(&mut self, v: impl IntoVal) {
+        match v.into_val() {
+            Val::Fixed(f) => self.patch.resonance = f,
+            Val::Fn(mut f) => {
+                self.patch.resonance = f(0.0);
+                self.automations.push((Param::Resonance, f));
+            }
+        }
     }
 
-    pub fn lfo_rate(&mut self, v: f32) {
-        self.desc.patch.lfo_rate = v;
+    pub fn lfo_rate(&mut self, v: impl IntoVal) {
+        match v.into_val() {
+            Val::Fixed(f) => self.patch.lfo_rate = f,
+            Val::Fn(mut f) => {
+                self.patch.lfo_rate = f(0.0);
+                self.automations.push((Param::LfoRate, f));
+            }
+        }
     }
 
-    pub fn lfo_depth(&mut self, v: f32) {
-        self.desc.patch.lfo_depth = v;
+    pub fn lfo_depth(&mut self, v: impl IntoVal) {
+        match v.into_val() {
+            Val::Fixed(f) => self.patch.lfo_depth = f,
+            Val::Fn(mut f) => {
+                self.patch.lfo_depth = f(0.0);
+                self.automations.push((Param::LfoDepth, f));
+            }
+        }
     }
+
+    // ── Non-automatable params (discrete values) ──
 
     pub fn filter_type(&mut self, v: FilterType) {
-        self.desc.patch.filter_type = v;
+        self.patch.filter_type = v;
     }
 
     pub fn retrigger(&mut self, v: RetriggerMode) {
-        self.desc.patch.retrigger = v;
+        self.patch.retrigger = v;
     }
 
     pub fn polyphony(&mut self, n: usize) {
-        self.desc.polyphony = n;
+        self.polyphony = n;
     }
 
     // ── Effects ──
@@ -236,42 +306,41 @@ impl SceneTrack {
     pub fn delay(&mut self, f: impl FnOnce(&mut crate::effect_config::DelayBuilder)) {
         let mut b = crate::effect_config::DelayBuilder::new();
         f(&mut b);
-        self.desc.effects.push(EffectConfig::Delay(b.into_config()));
+        self.effects.push(EffectConfig::Delay(b.into_config()));
     }
 
     pub fn distortion(&mut self, f: impl FnOnce(&mut crate::effect_config::DistortionBuilder)) {
         let mut b = crate::effect_config::DistortionBuilder::new();
         f(&mut b);
-        self.desc
-            .effects
+        self.effects
             .push(EffectConfig::Distortion(b.into_config()));
     }
 
     pub fn chorus(&mut self, f: impl FnOnce(&mut crate::effect_config::ChorusBuilder)) {
         let mut b = crate::effect_config::ChorusBuilder::new();
         f(&mut b);
-        self.desc
-            .effects
-            .push(EffectConfig::Chorus(b.into_config()));
+        self.effects.push(EffectConfig::Chorus(b.into_config()));
     }
 
-    // ── Clip / notes ──
+    // ── Looping pattern ──
 
-    /// Set loop length in beats. Notes will loop every N beats.
-    pub fn every(&mut self, beats: f32) {
-        self.desc.loop_beats = Some(beats);
+    /// Define a looping pattern. The closure re-runs at every loop boundary,
+    /// so randomness naturally produces different results each loop.
+    pub fn every(&mut self, beats: f32, f: impl FnMut(&mut crate::automation::Phrase) + Send + 'static) {
+        self.loop_beats = Some(beats);
+        self.pattern_fn = Some(Box::new(f));
     }
+
+    // ── One-shot notes (no looping) ──
 
     pub fn note(&mut self, time: Time, note: u8, vel: f32, dur: f32) {
         let end_time = match time {
             Time::Seconds(s) => Time::Seconds(s + dur),
             Time::Beats(b) => Time::Beats(b + dur),
         };
-        self.desc
-            .events
+        self.events
             .push((time, EventKind::NoteOn { note, vel }));
-        self.desc
-            .events
+        self.events
             .push((end_time, EventKind::NoteOff { note }));
     }
 
@@ -293,7 +362,6 @@ impl SceneTrack {
 
     // ── Sub-function delegation (for granular hot-reload) ──
 
-    /// Delegate to a sub-function for code organization.
     pub fn sound(&mut self, f: fn(&mut SceneTrack)) {
         f(self);
     }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::automation::PatternFn;
 use crate::clip::Clip;
 use crate::patch::Patch;
 use crate::score::Tempo;
@@ -41,13 +42,23 @@ impl Session {
         self.tracks.get_mut(name)
     }
 
-    pub fn launch(&mut self, track: &str, clip: Clip, current_sample: u64) {
+    pub fn launch_clip(
+        &mut self,
+        track: &str,
+        clip: Clip,
+        current_sample: u64,
+        pattern_fn: Option<PatternFn>,
+    ) {
         // Auto-create track with default patch if it doesn't exist
         if !self.tracks.contains_key(track) {
             self.add_track(track.to_string(), Patch::new(), 8);
         }
         if let Some(t) = self.tracks.get_mut(track) {
-            t.launch(clip, self.tempo, self.sample_rate, current_sample);
+            if let Some(pf) = pattern_fn {
+                t.launch_with_pattern(clip, self.tempo, self.sample_rate, current_sample, pf);
+            } else {
+                t.launch(clip, self.tempo, self.sample_rate, current_sample);
+            }
         }
     }
 
@@ -66,7 +77,7 @@ impl Session {
     /// Render all tracks into the output buffer, mixing them together.
     pub fn render(&mut self, output: &mut [f32], channels: usize, start_sample: u64) {
         let frames = output.len() / channels;
-        let sample_rate = self.sample_rate;
+        let tempo = self.tempo;
 
         for frame in 0..frames {
             let sample_idx = start_sample + frame as u64;
@@ -74,7 +85,7 @@ impl Session {
             let mut mix_l = 0.0_f32;
             let mut mix_r = 0.0_f32;
             for track in self.tracks.values_mut() {
-                let [l, r] = track.render_sample(sample_idx, sample_rate);
+                let [l, r] = track.render_sample(sample_idx, tempo);
                 mix_l += l;
                 mix_r += r;
             }

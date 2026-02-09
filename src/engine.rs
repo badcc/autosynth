@@ -1,5 +1,6 @@
 use std::sync::mpsc;
 
+use crate::automation::{AutomationFn, PatternFn};
 use crate::clip::Clip;
 use crate::event::Param;
 use crate::patch::Patch;
@@ -19,6 +20,7 @@ pub enum Command {
     LaunchClip {
         track: String,
         clip: Clip,
+        pattern_fn: Option<PatternFn>,
     },
     StopClip {
         track: String,
@@ -35,6 +37,12 @@ pub enum Command {
         track: String,
         param: Param,
         value: f32,
+    },
+
+    // Automations (track-scoped)
+    SetAutomations {
+        track: String,
+        automations: Vec<(Param, AutomationFn)>,
     },
 
     // Effects (track-scoped)
@@ -78,6 +86,15 @@ impl EngineHandle {
         let _ = self.tx.send(Command::LaunchClip {
             track: track.to_string(),
             clip,
+            pattern_fn: None,
+        });
+    }
+
+    pub fn launch_with_pattern(&self, track: &str, clip: Clip, pattern_fn: PatternFn) {
+        let _ = self.tx.send(Command::LaunchClip {
+            track: track.to_string(),
+            clip,
+            pattern_fn: Some(pattern_fn),
         });
     }
 
@@ -104,6 +121,13 @@ impl EngineHandle {
             track: track.to_string(),
             param,
             value,
+        });
+    }
+
+    pub fn set_automations(&self, track: &str, automations: Vec<(Param, AutomationFn)>) {
+        let _ = self.tx.send(Command::SetAutomations {
+            track: track.to_string(),
+            automations,
         });
     }
 
@@ -200,8 +224,13 @@ impl Engine {
             Command::RemoveTrack(name) => {
                 self.session.remove_track(&name);
             }
-            Command::LaunchClip { track, clip } => {
-                self.session.launch(&track, clip, self.sample_pos);
+            Command::LaunchClip {
+                track,
+                clip,
+                pattern_fn,
+            } => {
+                self.session
+                    .launch_clip(&track, clip, self.sample_pos, pattern_fn);
             }
             Command::StopClip { track, clip } => {
                 self.session.stop(&track, &clip);
@@ -221,6 +250,14 @@ impl Engine {
             } => {
                 if let Some(t) = self.session.track_mut(&track) {
                     t.synth.set_param(param, value);
+                }
+            }
+            Command::SetAutomations {
+                track,
+                automations,
+            } => {
+                if let Some(t) = self.session.track_mut(&track) {
+                    t.set_automations(automations);
                 }
             }
             Command::AddEffect { track, effect } => {

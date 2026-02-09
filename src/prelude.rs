@@ -1,4 +1,5 @@
 // ── Scene API (primary) ──
+pub use crate::automation::{IntoVal, Phrase};
 pub use crate::live::live;
 pub use crate::scene::{Scene, SceneTrack as Track};
 
@@ -15,7 +16,7 @@ pub use crate::waveform::Waveform;
 pub use crate::effects::{Chorus, Delay, DelayMode, Distortion, DistortionMode, Effect, StereoFrame};
 
 // ── Events ──
-pub use crate::event::{EventKind, Param};
+pub use crate::event::EventKind;
 
 // ── Duration helpers ──
 pub use crate::duration::{bars, dot, dotted, e, h, q, s, t, triplet, w};

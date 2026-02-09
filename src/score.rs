@@ -102,7 +102,7 @@ impl Score {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Sequence {
-    events: Vec<Event>,
+    pub(crate) events: Vec<Event>,
 }
 
 impl Sequence {
@@ -141,13 +141,23 @@ impl SequencePlayer {
         }
     }
 
-    pub fn advance_loop(&mut self, sample: u64) {
+    /// Advance the loop counter. Returns `true` if the loop wrapped around.
+    pub fn advance_loop(&mut self, sample: u64) -> bool {
+        let mut looped = false;
         if let Some(len) = self.loop_len {
             while sample >= self.base + len {
                 self.base = self.base.saturating_add(len);
                 self.index = 0;
+                looped = true;
             }
         }
+        looped
+    }
+
+    /// Replace the event list and reset playback index.
+    pub fn replace_events(&mut self, events: Vec<Event>) {
+        self.seq.events = events;
+        self.index = 0;
     }
 
     pub fn peek(&self) -> Option<Event> {
@@ -171,7 +181,7 @@ impl SequencePlayer {
     }
 }
 
-fn time_to_sample(time: Time, tempo: Tempo, sample_rate: f32) -> u64 {
+pub(crate) fn time_to_sample(time: Time, tempo: Tempo, sample_rate: f32) -> u64 {
     match time {
         Time::Seconds(s) => (s * sample_rate).max(0.0) as u64,
         Time::Beats(b) => {

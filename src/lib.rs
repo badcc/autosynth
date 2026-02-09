@@ -1,3 +1,4 @@
+pub mod automation;
 pub mod clip;
 pub mod duration;
 pub mod effect_config;
@@ -19,7 +20,6 @@ pub mod synth;
 pub mod track;
 pub mod waveform;
 
-pub(crate) mod diff;
 pub(crate) mod envelope;
 
 pub use live::live;

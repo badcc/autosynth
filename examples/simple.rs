@@ -1,3 +1,5 @@
+use std::f32::consts::TAU;
+
 use anyhow::Result;
 use rustsynth::prelude::*;
 
@@ -21,11 +23,12 @@ fn chords(t: &mut Track) {
         d.beats(0.5).feedback(0.4).mix(0.4).ping_pong();
     });
 
-    t.every(8.0);
-    t.chord(b(0.0), &diatonic_triad(E3, &MAJOR, 1), 0.5, s());
-    t.chord(b(2.0), &diatonic_triad(E3, &MAJOR, 6), 0.7, s());
-    t.chord(b(4.0), &diatonic_triad(E3, &MAJOR, 2), 0.6, s());
-    t.chord(b(6.0), &diatonic_triad(E3, &MAJOR, 5), 0.5, s());
+    t.every(8.0, |p| {
+        p.chord(b(0.0), &diatonic_triad(E3, &MAJOR, 1), 0.5, s());
+        p.chord(b(2.0), &diatonic_triad(E3, &MAJOR, 6), 0.7, s());
+        p.chord(b(4.0), &diatonic_triad(E3, &MAJOR, 2), 0.6, s());
+        p.chord(b(6.0), &diatonic_triad(E3, &MAJOR, 5), 0.5, s());
+    });
 }
 
 fn lead(t: &mut Track) {
@@ -38,7 +41,7 @@ fn lead(t: &mut Track) {
     t.release(0.01);
     t.retrigger(RetriggerMode::Soft);
     t.filter_type(FilterType::Lowpass);
-    t.cutoff(600.0);
+    t.cutoff(|beat: f32| 600.0 + 200.0 * (beat * 0.5 * TAU).sin());
     t.resonance(0.1);
     t.polyphony(1);
 
@@ -46,20 +49,22 @@ fn lead(t: &mut Track) {
         d.drive(12.0).fuzz().tone(0.8).bias(0.2).output(0.1);
     });
 
-    t.every(8.0);
-    t.note(b(0.0), degree(E3, &MAJOR, 1), 1.0, q() - 0.125);
-    t.note(b(q()), degree(E4, &MAJOR, 6), 0.5, s());
-    t.note(b(q() * 2.0), degree(E3, &MAJOR, 2), 1.0, q() - 0.125);
-    t.note(b(q() * 3.0), degree(E4, &MAJOR, 5), 0.5, s());
+    t.every(8.0, |p| {
+        p.note(b(0.0), degree(E3, &MAJOR, 1), 1.0, q() - 0.125);
+        p.note(b(q()), degree(E4, &MAJOR, 6), 0.5, s());
+        p.note(b(q() * 2.0), degree(E3, &MAJOR, 2), 1.0, q() - 0.125);
+        p.note(b(q() * 3.0), degree(E4, &MAJOR, 5), 0.5, s());
 
-    for i in 0..3 {
-        t.note(
-            b(7.0 + i as f32 * 0.125 + rand::random_range(0.0..0.125)),
-            degree(E4, &MAJOR, 3 - i),
-            1.0 - i as f32 * 0.3,
-            s(),
-        );
-    }
+        // Random notes that regenerate each loop
+        for i in 0..3 {
+            p.note(
+                b(7.0 + i as f32 * 0.125 + rand::random_range(0.0..0.125)),
+                degree(E4, &MAJOR, 3 - i),
+                1.0 - i as f32 * 0.3,
+                s(),
+            );
+        }
+    });
 }
 
 fn bass(t: &mut Track) {
@@ -71,7 +76,8 @@ fn bass(t: &mut Track) {
         d.drive(2.0).mix(0.3);
     });
 
-    t.every(8.0);
-    t.note(b(0.0), E2, 0.9, h());
-    t.note(b(6.0), E2 + 2, 0.9, 1.9);
+    t.every(8.0, |p| {
+        p.note(b(0.0), E2, 0.9, h());
+        p.note(b(6.0), E2 + 2, 0.9, 1.9);
+    });
 }
