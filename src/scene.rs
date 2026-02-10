@@ -2,6 +2,7 @@ use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 
 use subsecond::{HotFn, HotFnPtr};
+use tracing::{debug, trace};
 
 use crate::automation::{AutoCmd, Automation, Clock, IntoVal, OscParam, PatternFn, Phrase, Val};
 use crate::effect_config::EffectConfig;
@@ -110,17 +111,17 @@ impl Scene {
             let prev = self.snapshots.get(&id);
             if prev == Some(&new_snap) {
                 // Nothing structural changed — closures auto-update via subsecond
-                eprintln!("[scene] skip '{name}' (unchanged)");
+                trace!(track = %name, "skip (unchanged)");
                 self.snapshots.insert(id, new_snap);
                 return;
             }
             let fx_changed = prev.map(|p| p.effects != new_snap.effects).unwrap_or(true);
-            eprintln!("[scene] update '{name}' (structural change, fx_changed={fx_changed})");
+            debug!(track = %name, fx_changed, "update at boundary");
             self.snapshots.insert(id, new_snap);
             builder.send_update(&self.handle, &name, self.bpm, self.sample_rate, fx_changed);
         } else {
             // New track — create and launch immediately
-            eprintln!("[scene] add new track '{name}'");
+            debug!(track = %name, "add new track");
             self.snapshots.insert(id, new_snap);
             builder.send(&self.handle, &name, self.bpm, self.sample_rate);
             self.names.insert(id, name);

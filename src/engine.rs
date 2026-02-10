@@ -1,5 +1,7 @@
 use std::sync::mpsc;
 
+use tracing::debug;
+
 use crate::automation::{Automation, PatternFn};
 use crate::event::SynthParam;
 use crate::patch::Patch;
@@ -333,14 +335,12 @@ impl Engine {
                         loop_beats,
                     };
                     if t.has_active_loop() {
-                        eprintln!("[engine] queued pending update for '{track}' (has active loop)");
+                        debug!(track = %track, "queued pending update");
                         t.pending = Some(update);
                     } else {
-                        eprintln!("[engine] applying update immediately for '{track}' (no active loop)");
+                        debug!(track = %track, "applied update immediately");
                         t.apply_update(update, tempo);
                     }
-                } else {
-                    eprintln!("[engine] UpdateTrack: track '{track}' not found in session!");
                 }
             }
             Command::SetTempo(tempo) => {

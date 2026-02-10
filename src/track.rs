@@ -1,3 +1,5 @@
+use tracing::debug;
+
 use crate::automation::{AutoCmd, Automation, Clock, PatternFn, Phrase};
 use crate::effects::StereoFrame;
 use crate::event::Event;
@@ -179,7 +181,7 @@ impl Track {
 
                     // Apply pending hot-reload update at loop boundary
                     if let Some(update) = self.pending.take() {
-                        eprintln!("[track] applying pending update at loop boundary (iteration {})", slot.iteration);
+                        debug!(iteration = slot.iteration, "applying update at loop boundary");
                         self.synth.apply_patch(update.patch);
                         if let Some((effects, fx_enabled)) = update.effects {
                             self.fx_chain = effects;

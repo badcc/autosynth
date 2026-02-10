@@ -1,6 +1,8 @@
 // ── Scene API (primary) ──
 pub use crate::automation::{Clock, IntoVal, Phrase};
+#[cfg(feature = "live")]
 pub use crate::live::live;
+#[cfg(feature = "live")]
 pub use crate::scene::{OscBuilder, Scene, SceneTrack as Track};
 
 // ── Composition ──

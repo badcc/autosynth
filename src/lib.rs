@@ -6,12 +6,14 @@ pub mod engine;
 pub mod event;
 pub mod filter;
 pub mod harmony;
+#[cfg(feature = "live")]
 pub mod live;
 pub mod notes;
 pub mod oscillator;
 pub mod patch;
 pub mod pattern;
 pub mod prelude;
+#[cfg(feature = "live")]
 pub mod scene;
 pub mod score;
 pub mod session;
@@ -21,4 +23,5 @@ pub mod waveform;
 
 pub(crate) mod envelope;
 
+#[cfg(feature = "live")]
 pub use live::live;

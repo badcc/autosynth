@@ -1,3 +1,5 @@
+use std::f32::consts::TAU;
+
 use anyhow::Result;
 use autosynth::prelude::*;
 
@@ -15,7 +17,7 @@ fn scene(s: &mut Scene) {
 fn lead2(t: &mut Track) {
     t.osc(Waveform::Triangle, 0.5);
     t.osc(Waveform::Saw, 0.5).phase_offset(0.5);
-    t.osc(Waveform::Saw, 0.5).phase_offset(0.0).detune(0.005);
+    t.osc(Waveform::Saw, 0.5).phase_offset(0.0).detune(0.4);
     t.gain(0.5);
     // t.filter_type(FilterType::Notch);
     // t.cutoff(|c: Clock| 500.0 + 500.0 * (c.beat * 0.025 * std::f32::consts::TAU).sin());

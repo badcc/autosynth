@@ -11,6 +11,13 @@ use crate::score::Tempo;
 /// Scene is stateful — per-track HotFn pointer comparison skips
 /// unchanged tracks between patches.
 pub fn live(bpm: f32, scene_fn: fn(&mut Scene)) -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "autosynth=debug".parse().unwrap()),
+        )
+        .init();
+
     let host = cpal::default_host();
     let device = host
         .default_output_device()
