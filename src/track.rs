@@ -36,6 +36,16 @@ struct ClipSlot {
     iteration: u32,
 }
 
+/// Buffered update applied at the next loop boundary.
+pub(crate) struct PendingUpdate {
+    pub patch: Patch,
+    /// None = keep existing effects chain (preserves delay buffers etc.)
+    pub effects: Option<(Vec<Box<dyn crate::effects::Effect>>, Vec<bool>)>,
+    pub automations: Vec<Automation>,
+    pub pattern_fn: Option<PatternFn>,
+    pub loop_beats: Option<f32>,
+}
+
 pub struct Track {
     pub(crate) synth: Synth,
     slot: Option<ClipSlot>,
@@ -46,6 +56,7 @@ pub struct Track {
     sample_rate: f32,
     loop_beats: Option<f32>,
     last_automation_tick: u64,
+    pub(crate) pending: Option<PendingUpdate>,
 }
 
 impl Track {
@@ -60,6 +71,7 @@ impl Track {
             sample_rate,
             loop_beats: None,
             last_automation_tick: u64::MAX,
+            pending: None,
         }
     }
 
@@ -115,6 +127,42 @@ impl Track {
         self.last_automation_tick = u64::MAX;
     }
 
+    /// Whether this track has an active looping clip (i.e. a loop boundary will come).
+    pub(crate) fn has_active_loop(&self) -> bool {
+        self.slot
+            .as_ref()
+            .is_some_and(|s| s.active && s.player.loop_len.is_some())
+    }
+
+    /// Apply a pending update immediately (used for non-looping tracks).
+    pub(crate) fn apply_update(&mut self, update: PendingUpdate, tempo: Tempo) {
+        self.synth.apply_patch(update.patch);
+        if let Some((effects, fx_enabled)) = update.effects {
+            self.fx_chain = effects;
+            self.fx_enabled = fx_enabled;
+        }
+        self.automations = update.automations;
+        self.last_automation_tick = u64::MAX;
+
+        if let Some(pf) = update.pattern_fn {
+            if let Some(slot) = &mut self.slot {
+                slot.generator = Some(ClipGenerator {
+                    func: pf,
+                    tempo,
+                    sample_rate: self.sample_rate,
+                });
+            }
+        }
+        if let Some(beats) = update.loop_beats {
+            self.loop_beats = Some(beats);
+            if let Some(slot) = &mut self.slot {
+                let seconds = beats * 60.0 / tempo.bpm;
+                let loop_samples = (seconds * self.sample_rate) as u64;
+                slot.player.set_loop_len(loop_samples);
+            }
+        }
+    }
+
     /// Render one stereo frame for this track: dispatch events, render synth (mono),
     /// widen to stereo, apply FX chain, apply gain.
     pub fn render_sample(&mut self, sample_idx: u64, tempo: Tempo) -> StereoFrame {
@@ -128,6 +176,33 @@ impl Track {
                 if looped {
                     self.synth.all_notes_off();
                     slot.iteration += 1;
+
+                    // Apply pending hot-reload update at loop boundary
+                    if let Some(update) = self.pending.take() {
+                        eprintln!("[track] applying pending update at loop boundary (iteration {})", slot.iteration);
+                        self.synth.apply_patch(update.patch);
+                        if let Some((effects, fx_enabled)) = update.effects {
+                            self.fx_chain = effects;
+                            self.fx_enabled = fx_enabled;
+                        }
+                        self.automations = update.automations;
+                        self.last_automation_tick = u64::MAX;
+
+                        if let Some(pf) = update.pattern_fn {
+                            slot.generator = Some(ClipGenerator {
+                                func: pf,
+                                tempo,
+                                sample_rate,
+                            });
+                        }
+                        if let Some(beats) = update.loop_beats {
+                            self.loop_beats = Some(beats);
+                            let seconds = beats * 60.0 / tempo.bpm;
+                            let loop_samples = (seconds * sample_rate) as u64;
+                            slot.player.set_loop_len(loop_samples);
+                        }
+                    }
+
                     if let Some(ref mut g) = slot.generator {
                         let beat =
                             sample_idx as f64 / sample_rate as f64 * tempo.bpm as f64 / 60.0;

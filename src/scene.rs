@@ -37,6 +37,14 @@ fn short_name<F: 'static>() -> String {
 
 // ── Scene (stateful, long-lived) ──
 
+/// Comparable snapshot of a track's structural config (everything except closures).
+#[derive(Clone, PartialEq)]
+struct TrackSnapshot {
+    patch: Patch,
+    effects: Vec<EffectConfig>,
+    loop_beats: Option<f32>,
+}
+
 pub struct Scene {
     bpm: f32,
     sample_rate: f32,
@@ -44,6 +52,8 @@ pub struct Scene {
     names: HashMap<TrackId, String>,
     ptrs: HashMap<TrackId, HotFnPtr>,
     seen: HashSet<TrackId>,
+    /// Previous structural state per track, for diffing on hot-reload.
+    snapshots: HashMap<TrackId, TrackSnapshot>,
 }
 
 impl Scene {
@@ -55,6 +65,7 @@ impl Scene {
             names: HashMap::new(),
             ptrs: HashMap::new(),
             seen: HashSet::new(),
+            snapshots: HashMap::new(),
         }
     }
 
@@ -66,7 +77,8 @@ impl Scene {
     }
 
     /// Register a track. The function IS the identity.
-    /// On hot-reload (ptr changed), tears down and rebuilds the track entirely.
+    /// On hot-reload (ptr changed), queues a boundary-aligned update for existing
+    /// tracks. New tracks are created immediately.
     pub fn track<F: Fn(&mut SceneTrack) + 'static>(&mut self, f: F) {
         let id = TrackId::of::<F>();
         self.seen.insert(id);
@@ -80,20 +92,39 @@ impl Scene {
                 return;
             }
 
-        // Function changed (or new track) — evaluate and rebuild
+        // Function changed (or new track) — evaluate the builder
         self.ptrs.insert(id, ptr);
 
         let name = short_name::<F>();
         let mut builder = SceneTrack::new();
         hot.call((&mut builder,));
 
-        // Tear down old track if it exists
-        if self.names.contains_key(&id) {
-            self.handle.remove_track(&name);
-        }
+        let new_snap = TrackSnapshot {
+            patch: builder.patch().clone(),
+            effects: builder.effect_configs().to_vec(),
+            loop_beats: builder.loop_beats(),
+        };
 
-        builder.send(&self.handle, &name, self.bpm, self.sample_rate);
-        self.names.insert(id, name);
+        if self.names.contains_key(&id) {
+            // Existing track — compare structural output to decide what to do
+            let prev = self.snapshots.get(&id);
+            if prev == Some(&new_snap) {
+                // Nothing structural changed — closures auto-update via subsecond
+                eprintln!("[scene] skip '{name}' (unchanged)");
+                self.snapshots.insert(id, new_snap);
+                return;
+            }
+            let fx_changed = prev.map(|p| p.effects != new_snap.effects).unwrap_or(true);
+            eprintln!("[scene] update '{name}' (structural change, fx_changed={fx_changed})");
+            self.snapshots.insert(id, new_snap);
+            builder.send_update(&self.handle, &name, self.bpm, self.sample_rate, fx_changed);
+        } else {
+            // New track — create and launch immediately
+            eprintln!("[scene] add new track '{name}'");
+            self.snapshots.insert(id, new_snap);
+            builder.send(&self.handle, &name, self.bpm, self.sample_rate);
+            self.names.insert(id, name);
+        }
     }
 
     /// Call after all track() calls in a frame to detect removed tracks.
@@ -110,6 +141,7 @@ impl Scene {
                 self.handle.remove_track(&name);
             }
             self.ptrs.remove(&id);
+            self.snapshots.remove(&id);
         }
 
         self.seen.clear();
@@ -184,6 +216,45 @@ impl SceneTrack {
         if !automations.is_empty() {
             handle.set_automations(name, automations);
         }
+    }
+
+    fn patch(&self) -> &Patch {
+        &self.patch
+    }
+
+    fn effect_configs(&self) -> &[EffectConfig] {
+        &self.effects
+    }
+
+    fn loop_beats(&self) -> Option<f32> {
+        self.loop_beats
+    }
+
+    /// Send a boundary-aligned update for an existing track (no teardown).
+    /// When `fx_changed` is false, effects are omitted to preserve delay buffers etc.
+    fn send_update(self, handle: &EngineHandle, name: &str, bpm: f32, sr: f32, fx_changed: bool) {
+        let SceneTrack {
+            patch,
+            polyphony: _,
+            effects,
+            fx_enabled,
+            phrase: _,
+            loop_beats,
+            pattern_fn,
+            automations,
+            oscs_set: _,
+        } = self;
+
+        let built_effects = if fx_changed {
+            Some((
+                effects.iter().map(|e| e.build(bpm, sr)).collect(),
+                fx_enabled,
+            ))
+        } else {
+            None
+        };
+
+        handle.update_track(name, patch, built_effects, automations, pattern_fn, loop_beats);
     }
 
     // ── Oscillator config ──

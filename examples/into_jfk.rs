@@ -29,11 +29,11 @@ fn lead2(t: &mut Track) {
     // let deg = [1, 2, 1, 3, 6, 5, 4];
 
     t.every(16.0, |p| {
-        let deg = (0..7)
+        let deg = (0..8)
             .map(|_| rand::random::<u8>() % 5 + 1)
             .map(|d| d as usize)
             .collect::<Vec<_>>();
-        let dur = [e(), e(), e(), e(), e(), e(), e()];
+        let dur = [e(), e(), e(), e(), e(), e(), e(), s()];
         let delay = [
             dotted(e()),
             dotted(e()),
@@ -69,13 +69,12 @@ fn bass(t: &mut Track) {
 
     t.cutoff(800.0);
 
-    // distortion
     t.distortion(|d| {
         d.drive(15.0).saturate().mix(0.7).output(0.8);
     });
 
     t.every(16.0, |p| {
-        p.note(b(0.0), E1, 0.6, w());
+        p.note(b(0.0), E1, 0.6, dotted(w()));
     })
 }
 

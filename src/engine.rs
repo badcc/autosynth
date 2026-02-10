@@ -5,6 +5,7 @@ use crate::event::SynthParam;
 use crate::patch::Patch;
 use crate::score::{Score, Tempo};
 use crate::session::Session;
+use crate::track::PendingUpdate;
 
 pub(crate) enum Command {
     // Track management
@@ -51,6 +52,17 @@ pub(crate) enum Command {
     SetFxEnabled {
         track: String,
         enabled: Vec<bool>,
+    },
+
+    // Hot-reload: boundary-aligned update for existing tracks
+    UpdateTrack {
+        track: String,
+        patch: Patch,
+        /// None = keep existing effects (preserves delay buffers etc.)
+        effects: Option<(Vec<Box<dyn crate::effects::Effect>>, Vec<bool>)>,
+        automations: Vec<Automation>,
+        pattern_fn: Option<PatternFn>,
+        loop_beats: Option<f32>,
     },
 
     // Global
@@ -153,6 +165,25 @@ impl EngineHandle {
         let _ = self.tx.send(Command::SetFxEnabled {
             track: track.to_string(),
             enabled,
+        });
+    }
+
+    pub(crate) fn update_track(
+        &self,
+        track: &str,
+        patch: Patch,
+        effects: Option<(Vec<Box<dyn crate::effects::Effect>>, Vec<bool>)>,
+        automations: Vec<Automation>,
+        pattern_fn: Option<PatternFn>,
+        loop_beats: Option<f32>,
+    ) {
+        let _ = self.tx.send(Command::UpdateTrack {
+            track: track.to_string(),
+            patch,
+            effects,
+            automations,
+            pattern_fn,
+            loop_beats,
         });
     }
 
@@ -282,6 +313,34 @@ impl Engine {
             Command::SetFxEnabled { track, enabled } => {
                 if let Some(t) = self.session.track_mut(&track) {
                     t.fx_enabled = enabled;
+                }
+            }
+            Command::UpdateTrack {
+                track,
+                patch,
+                effects,
+                automations,
+                pattern_fn,
+                loop_beats,
+            } => {
+                let tempo = self.session.tempo();
+                if let Some(t) = self.session.track_mut(&track) {
+                    let update = PendingUpdate {
+                        patch,
+                        effects,
+                        automations,
+                        pattern_fn,
+                        loop_beats,
+                    };
+                    if t.has_active_loop() {
+                        eprintln!("[engine] queued pending update for '{track}' (has active loop)");
+                        t.pending = Some(update);
+                    } else {
+                        eprintln!("[engine] applying update immediately for '{track}' (no active loop)");
+                        t.apply_update(update, tempo);
+                    }
+                } else {
+                    eprintln!("[engine] UpdateTrack: track '{track}' not found in session!");
                 }
             }
             Command::SetTempo(tempo) => {

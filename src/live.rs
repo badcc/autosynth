@@ -25,6 +25,9 @@ pub fn live(bpm: f32, scene_fn: fn(&mut Scene)) -> Result<()> {
         .context("Failed to build audio stream")?;
     stream.play()?;
 
+    // Connect to dx serve for hot-patching (subsecond needs this for ASLR reference)
+    dioxus_devtools::connect_subsecond();
+
     println!("autosynth live @ {bpm} BPM — Ctrl+C to stop");
 
     let mut scene = Scene::new(bpm, sample_rate, handle);

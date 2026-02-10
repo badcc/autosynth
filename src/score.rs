@@ -73,7 +73,7 @@ impl Sequence {
 pub(crate) struct SequencePlayer {
     seq: Sequence,
     index: usize,
-    loop_len: Option<u64>,
+    pub(crate) loop_len: Option<u64>,
     base: u64,
 }
 
@@ -113,6 +113,11 @@ impl SequencePlayer {
     pub fn replace_events(&mut self, events: Vec<Event>) {
         self.seq.events = events;
         self.index = 0;
+    }
+
+    /// Update the loop length (in samples). Takes effect on the next loop wrap.
+    pub fn set_loop_len(&mut self, len: u64) {
+        self.loop_len = Some(len.max(1));
     }
 
     pub fn peek(&self) -> Option<Event> {
