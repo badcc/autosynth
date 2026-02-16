@@ -55,6 +55,10 @@ pub struct Scene {
     seen: HashSet<TrackId>,
     /// Previous structural state per track, for diffing on hot-reload.
     snapshots: HashMap<TrackId, TrackSnapshot>,
+    /// MIDI input target (set by `midi()`, resolved in `finish_frame()`)
+    midi_target: Option<TrackId>,
+    /// Last MIDI target name sent to the engine (deduplication)
+    midi_sent: Option<String>,
 }
 
 impl Scene {
@@ -67,6 +71,8 @@ impl Scene {
             ptrs: HashMap::new(),
             seen: HashSet::new(),
             snapshots: HashMap::new(),
+            midi_target: None,
+            midi_sent: None,
         }
     }
 
@@ -128,6 +134,11 @@ impl Scene {
         }
     }
 
+    /// Route MIDI input to the given track's synth.
+    pub fn midi<F: Fn(&mut SceneTrack) + 'static>(&mut self, _f: F) {
+        self.midi_target = Some(TrackId::of::<F>());
+    }
+
     /// Call after all track() calls in a frame to detect removed tracks.
     pub fn finish_frame(&mut self) {
         let removed: Vec<TrackId> = self
@@ -143,6 +154,16 @@ impl Scene {
             }
             self.ptrs.remove(&id);
             self.snapshots.remove(&id);
+        }
+
+        // Resolve MIDI target and send if changed
+        if let Some(id) = self.midi_target {
+            if let Some(name) = self.names.get(&id) {
+                if self.midi_sent.as_ref() != Some(name) {
+                    self.handle.set_midi_track(name);
+                    self.midi_sent = Some(name.clone());
+                }
+            }
         }
 
         self.seen.clear();

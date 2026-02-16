@@ -67,6 +67,11 @@ pub(crate) enum Command {
         loop_beats: Option<f32>,
     },
 
+    // MIDI input (real-time, routed to armed track)
+    MidiNoteOn { note: u8, vel: f32 },
+    MidiNoteOff { note: u8 },
+    SetMidiTrack(String),
+
     // Global
     SetTempo(Tempo),
 }
@@ -192,6 +197,18 @@ impl EngineHandle {
     pub fn set_tempo(&self, tempo: Tempo) {
         let _ = self.tx.send(Command::SetTempo(tempo));
     }
+
+    pub fn midi_note_on(&self, note: u8, vel: f32) {
+        let _ = self.tx.send(Command::MidiNoteOn { note, vel });
+    }
+
+    pub fn midi_note_off(&self, note: u8) {
+        let _ = self.tx.send(Command::MidiNoteOff { note });
+    }
+
+    pub fn set_midi_track(&self, name: &str) {
+        let _ = self.tx.send(Command::SetMidiTrack(name.to_string()));
+    }
 }
 
 pub struct Engine {
@@ -199,6 +216,7 @@ pub struct Engine {
     rx: mpsc::Receiver<Command>,
     sample_pos: u64,
     channels: usize,
+    midi_track: Option<String>,
 }
 
 impl Engine {
@@ -213,6 +231,7 @@ impl Engine {
             rx,
             sample_pos: 0,
             channels,
+            midi_track: None,
         };
         let handle = EngineHandle { tx };
         (engine, handle)
@@ -342,6 +361,23 @@ impl Engine {
                         t.apply_update(update, tempo);
                     }
                 }
+            }
+            Command::MidiNoteOn { note, vel } => {
+                if let Some(ref name) = self.midi_track {
+                    if let Some(t) = self.session.track_mut(name) {
+                        t.synth.note_on(note, vel);
+                    }
+                }
+            }
+            Command::MidiNoteOff { note } => {
+                if let Some(ref name) = self.midi_track {
+                    if let Some(t) = self.session.track_mut(name) {
+                        t.synth.note_off(note);
+                    }
+                }
+            }
+            Command::SetMidiTrack(name) => {
+                self.midi_track = Some(name);
             }
             Command::SetTempo(tempo) => {
                 self.session.set_tempo(tempo);

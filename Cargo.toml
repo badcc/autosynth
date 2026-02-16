@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = ["live"]
-live = ["dep:subsecond", "dep:dioxus-devtools"]
+live = ["dep:subsecond", "dep:dioxus-devtools", "dep:midir"]
 
 [dependencies]
 anyhow = "1.0"
@@ -13,5 +13,6 @@ cpal = "0.15"
 rand = "0.10.0"
 subsecond = { version = "0.7", optional = true }
 dioxus-devtools = { version = "0.7", optional = true }
+midir = { version = "0.10", optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -14,6 +14,8 @@ pub mod patch;
 pub mod pattern;
 pub mod prelude;
 #[cfg(feature = "live")]
+pub(crate) mod midi;
+#[cfg(feature = "live")]
 pub mod scene;
 pub mod score;
 pub mod session;
