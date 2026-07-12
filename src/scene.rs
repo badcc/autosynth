@@ -1,8 +1,10 @@
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use subsecond::{HotFn, HotFnPtr};
-use tracing::{debug, trace};
+use tracing::debug;
 
 use crate::automation::{AutoCmd, Automation, Clock, IntoVal, OscParam, PatternFn, Phrase, Val};
 use crate::effect_config::EffectConfig;
@@ -13,6 +15,7 @@ use crate::filter::FilterType;
 use crate::oscillator::Oscillator;
 use crate::patch::Patch;
 use crate::pattern::Pattern;
+use crate::sample::{SampleCache, SampleData};
 use crate::score::{Score, Time};
 use crate::waveform::Waveform;
 
@@ -44,6 +47,9 @@ struct TrackSnapshot {
     patch: Patch,
     effects: Vec<EffectConfig>,
     loop_beats: Option<f32>,
+    sample_path: Option<PathBuf>,
+    root_note: u8,
+    kit_paths: Vec<(u8, PathBuf)>,
 }
 
 pub struct Scene {
@@ -59,6 +65,7 @@ pub struct Scene {
     midi_target: Option<TrackId>,
     /// Last MIDI target name sent to the engine (deduplication)
     midi_sent: Option<String>,
+    sample_cache: SampleCache,
 }
 
 impl Scene {
@@ -73,6 +80,7 @@ impl Scene {
             snapshots: HashMap::new(),
             midi_target: None,
             midi_sent: None,
+            sample_cache: SampleCache::new(),
         }
     }
 
@@ -93,6 +101,7 @@ impl Scene {
         // Check if this track's function pointer changed
         let mut hot = HotFn::current(f);
         let ptr = hot.ptr_address();
+        let name = short_name::<F>();
 
         if let Some(old_ptr) = self.ptrs.get(&id)
             && *old_ptr == ptr {
@@ -100,29 +109,88 @@ impl Scene {
             }
 
         // Function changed (or new track) — evaluate the builder
+        let is_new = !self.ptrs.contains_key(&id);
+        debug!(track = %name, ?ptr, is_new, "ptr changed — evaluating builder");
         self.ptrs.insert(id, ptr);
 
-        let name = short_name::<F>();
         let mut builder = SceneTrack::new();
         hot.call((&mut builder,));
+
+        // Load sample data if a sample path was set
+        if let Some(ref path) = builder.sample_path {
+            builder.sample_data = self.sample_cache.get(path);
+        }
+
+        // Load kit samples
+        if !builder.kit_slots.is_empty() {
+            let mut map = HashMap::new();
+            for (note, path) in &builder.kit_slots {
+                if let Some(data) = self.sample_cache.get(path) {
+                    map.insert(*note, data);
+                }
+            }
+            builder.kit_map = Some(map);
+        }
+
+        debug!(
+            track = %name,
+            has_pattern = builder.pattern_fn.is_some(),
+            has_automations = !builder.automations.is_empty(),
+            loop_beats = ?builder.loop_beats(),
+            has_sample = builder.sample_data.is_some(),
+            kit_slots = builder.kit_slots.len(),
+            "builder result"
+        );
 
         let new_snap = TrackSnapshot {
             patch: builder.patch().clone(),
             effects: builder.effect_configs().to_vec(),
             loop_beats: builder.loop_beats(),
+            sample_path: builder.sample_path.clone(),
+            root_note: builder.root_note,
+            kit_paths: builder.kit_slots.clone(),
         };
 
         if self.names.contains_key(&id) {
             // Existing track — compare structural output to decide what to do
             let prev = self.snapshots.get(&id);
-            if prev == Some(&new_snap) {
-                // Nothing structural changed — closures auto-update via subsecond
-                trace!(track = %name, "skip (unchanged)");
+            let snap_eq = prev == Some(&new_snap);
+
+            // Source type change (sample_path, root_note, or kit changed) requires teardown
+            let source_changed = prev.map(|p| {
+                p.sample_path != new_snap.sample_path
+                    || p.root_note != new_snap.root_note
+                    || p.kit_paths != new_snap.kit_paths
+            }).unwrap_or(false);
+
+            debug!(
+                track = %name,
+                snap_eq,
+                source_changed,
+                patch_changed = prev.map(|p| p.patch != new_snap.patch).unwrap_or(true),
+                fx_changed = prev.map(|p| p.effects != new_snap.effects).unwrap_or(true),
+                loop_changed = prev.map(|p| p.loop_beats != new_snap.loop_beats).unwrap_or(true),
+                "snapshot comparison"
+            );
+
+            if source_changed {
+                // Remove + re-add: source type or root note changed
+                debug!(track = %name, "source changed — remove + re-add");
+                self.handle.remove_track(&name);
+                self.snapshots.insert(id, new_snap);
+                builder.send(&self.handle, &name, self.bpm, self.sample_rate);
+                return;
+            }
+
+            let has_closures = builder.pattern_fn.is_some() || !builder.automations.is_empty();
+            if snap_eq && !has_closures {
+                // Nothing structural changed and no closures to update
+                debug!(track = %name, "SKIPPING update (snapshot unchanged, no closures)");
                 self.snapshots.insert(id, new_snap);
                 return;
             }
             let fx_changed = prev.map(|p| p.effects != new_snap.effects).unwrap_or(true);
-            debug!(track = %name, fx_changed, "update at boundary");
+            debug!(track = %name, fx_changed, "sending UpdateTrack");
             self.snapshots.insert(id, new_snap);
             builder.send_update(&self.handle, &name, self.bpm, self.sample_rate, fx_changed);
         } else {
@@ -182,6 +250,12 @@ pub struct SceneTrack {
     pattern_fn: Option<PatternFn>,
     automations: Vec<Automation>,
     oscs_set: bool,
+    sample_path: Option<PathBuf>,
+    sample_data: Option<Arc<SampleData>>,
+    root_note: u8,
+    kit_slots: Vec<(u8, PathBuf)>,
+    next_kit_note: u8,
+    kit_map: Option<HashMap<u8, Arc<SampleData>>>,
 }
 
 impl SceneTrack {
@@ -196,6 +270,12 @@ impl SceneTrack {
             pattern_fn: None,
             automations: Vec::new(),
             oscs_set: false,
+            sample_path: None,
+            sample_data: None,
+            root_note: 60, // C4
+            kit_slots: Vec::new(),
+            next_kit_note: 24, // C1
+            kit_map: None,
         }
     }
 
@@ -211,9 +291,21 @@ impl SceneTrack {
             pattern_fn,
             automations,
             oscs_set: _,
+            sample_path: _,
+            sample_data,
+            root_note,
+            kit_slots: _,
+            next_kit_note: _,
+            kit_map,
         } = self;
 
-        handle.add_track_with_polyphony(name, patch, polyphony);
+        if let Some(map) = kit_map {
+            handle.add_kit_track(name, patch, polyphony, map);
+        } else if let Some(data) = sample_data {
+            handle.add_sampler_track(name, patch, polyphony, data, root_note);
+        } else {
+            handle.add_track_with_polyphony(name, patch, polyphony);
+        }
 
         for effect in &effects {
             handle.add_effect_boxed(name, effect.build(bpm, sr));
@@ -265,6 +357,12 @@ impl SceneTrack {
             pattern_fn,
             automations,
             oscs_set: _,
+            sample_path: _,
+            sample_data: _,
+            root_note: _,
+            kit_slots: _,
+            next_kit_note: _,
+            kit_map: _,
         } = self;
 
         let built_effects = if fx_changed {
@@ -414,6 +512,37 @@ impl SceneTrack {
 
     pub fn polyphony(&mut self, n: usize) {
         self.polyphony = n;
+    }
+
+    // ── Kit slots ──
+
+    /// Assign a sample to an auto-assigned kit slot. Returns the MIDI note number.
+    pub fn slot(&mut self, path: &str) -> u8 {
+        let note = self.next_kit_note;
+        self.next_kit_note = self.next_kit_note.saturating_add(1);
+        self.kit_slots.push((note, PathBuf::from(path)));
+        note
+    }
+
+    /// Assign a sample to a specific MIDI note slot. Returns the note.
+    pub fn slot_at(&mut self, note: u8, path: &str) -> u8 {
+        if note >= self.next_kit_note {
+            self.next_kit_note = note.saturating_add(1);
+        }
+        self.kit_slots.push((note, PathBuf::from(path)));
+        note
+    }
+
+    // ── Sample playback ──
+
+    /// Use a WAV file as the sound source instead of oscillators.
+    pub fn sample(&mut self, path: &str) {
+        self.sample_path = Some(PathBuf::from(path));
+    }
+
+    /// Set the root note for sample pitch mapping (default: C4 / 60).
+    pub fn root(&mut self, note: u8) {
+        self.root_note = note;
     }
 
     // ── Effects ──

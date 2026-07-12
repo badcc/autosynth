@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::automation::PatternFn;
 use crate::patch::Patch;
+use crate::sample::SampleData;
 use crate::score::{Score, Tempo};
 use crate::track::Track;
 
@@ -31,6 +33,33 @@ impl Session {
     pub fn add_track(&mut self, name: String, patch: Patch, polyphony: usize) {
         self.tracks
             .insert(name, Track::new(self.sample_rate, patch, polyphony));
+    }
+
+    pub fn add_sampler_track(
+        &mut self,
+        name: String,
+        patch: Patch,
+        polyphony: usize,
+        data: Arc<SampleData>,
+        root_note: u8,
+    ) {
+        self.tracks.insert(
+            name,
+            Track::new_sampler(self.sample_rate, patch, polyphony, data, root_note),
+        );
+    }
+
+    pub fn add_kit_track(
+        &mut self,
+        name: String,
+        patch: Patch,
+        polyphony: usize,
+        map: HashMap<u8, Arc<SampleData>>,
+    ) {
+        self.tracks.insert(
+            name,
+            Track::new_kit(self.sample_rate, patch, polyphony, map),
+        );
     }
 
     pub fn remove_track(&mut self, name: &str) {

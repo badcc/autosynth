@@ -1,11 +1,107 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use tracing::debug;
 
-use crate::automation::{AutoCmd, Automation, Clock, PatternFn, Phrase};
+use crate::automation::{AutoCmd, Automation, Clock, OscParam, PatternFn, Phrase};
 use crate::effects::StereoFrame;
-use crate::event::Event;
+use crate::envelope::RetriggerMode;
+use crate::event::{Event, EventKind, SynthParam};
+use crate::filter::FilterType;
 use crate::patch::Patch;
+use crate::sample::SampleData;
+use crate::sampler::Sampler;
 use crate::score::{time_to_sample, Score, SequencePlayer, Tempo};
 use crate::synth::Synth;
+use crate::waveform::Waveform;
+
+// ── SoundSource: enum over Synth/Sampler to avoid dyn dispatch ──
+
+pub(crate) enum SoundSource {
+    Synth(Synth),
+    Sampler(Sampler),
+}
+
+impl SoundSource {
+    pub fn apply_event(&mut self, event: EventKind) {
+        match self {
+            Self::Synth(s) => s.apply_event(event),
+            Self::Sampler(s) => s.apply_event(event),
+        }
+    }
+
+    pub fn render_sample(&mut self) -> f32 {
+        match self {
+            Self::Synth(s) => s.render_sample(),
+            Self::Sampler(s) => s.render_sample(),
+        }
+    }
+
+    pub fn all_notes_off(&mut self) {
+        match self {
+            Self::Synth(s) => s.all_notes_off(),
+            Self::Sampler(s) => s.all_notes_off(),
+        }
+    }
+
+    pub fn apply_patch(&mut self, patch: Patch) {
+        match self {
+            Self::Synth(s) => s.apply_patch(patch),
+            Self::Sampler(s) => s.apply_patch(patch),
+        }
+    }
+
+    pub fn set_param(&mut self, param: SynthParam, value: f32) {
+        match self {
+            Self::Synth(s) => s.set_param(param, value),
+            Self::Sampler(s) => s.set_param(param, value),
+        }
+    }
+
+    pub fn set_filter_type(&mut self, ft: FilterType) {
+        match self {
+            Self::Synth(s) => s.set_filter_type(ft),
+            Self::Sampler(s) => s.set_filter_type(ft),
+        }
+    }
+
+    pub fn set_retrigger(&mut self, mode: RetriggerMode) {
+        match self {
+            Self::Synth(s) => s.set_retrigger(mode),
+            Self::Sampler(s) => s.set_retrigger(mode),
+        }
+    }
+
+    pub fn set_osc_param(&mut self, index: usize, param: OscParam, value: f32) {
+        match self {
+            Self::Synth(s) => s.set_osc_param(index, param, value),
+            Self::Sampler(s) => s.set_osc_param(index, param, value),
+        }
+    }
+
+    pub fn set_osc_waveform(&mut self, index: usize, waveform: Waveform) {
+        match self {
+            Self::Synth(s) => s.set_osc_waveform(index, waveform),
+            Self::Sampler(s) => s.set_osc_waveform(index, waveform),
+        }
+    }
+
+    pub fn note_on(&mut self, note: u8, vel: f32) {
+        match self {
+            Self::Synth(s) => s.note_on(note, vel),
+            Self::Sampler(s) => s.note_on(note, vel),
+        }
+    }
+
+    pub fn note_off(&mut self, note: u8) {
+        match self {
+            Self::Synth(s) => s.note_off(note),
+            Self::Sampler(s) => s.note_off(note),
+        }
+    }
+}
+
+// ── ClipGenerator / ClipSlot (unchanged) ──
 
 struct ClipGenerator {
     func: PatternFn,
@@ -38,18 +134,15 @@ struct ClipSlot {
     iteration: u32,
 }
 
-/// Buffered update applied at the next loop boundary.
-pub(crate) struct PendingUpdate {
-    pub patch: Patch,
-    /// None = keep existing effects chain (preserves delay buffers etc.)
-    pub effects: Option<(Vec<Box<dyn crate::effects::Effect>>, Vec<bool>)>,
-    pub automations: Vec<Automation>,
+/// Timing update queued to the next loop boundary (pattern + loop length).
+/// Sound changes (patch, effects, automations) are applied immediately.
+pub(crate) struct PendingTimingUpdate {
     pub pattern_fn: Option<PatternFn>,
     pub loop_beats: Option<f32>,
 }
 
 pub struct Track {
-    pub(crate) synth: Synth,
+    pub(crate) source: SoundSource,
     slot: Option<ClipSlot>,
     pub gain: f32,
     pub(crate) fx_chain: Vec<Box<dyn crate::effects::Effect>>,
@@ -58,13 +151,56 @@ pub struct Track {
     sample_rate: f32,
     loop_beats: Option<f32>,
     last_automation_tick: u64,
-    pub(crate) pending: Option<PendingUpdate>,
+    pub(crate) pending: Option<PendingTimingUpdate>,
 }
 
 impl Track {
     pub fn new(sample_rate: f32, patch: Patch, polyphony: usize) -> Self {
         Self {
-            synth: Synth::with_patch(sample_rate, polyphony, patch),
+            source: SoundSource::Synth(Synth::with_patch(sample_rate, polyphony, patch)),
+            slot: None,
+            gain: 1.0,
+            fx_chain: Vec::new(),
+            fx_enabled: Vec::new(),
+            automations: Vec::new(),
+            sample_rate,
+            loop_beats: None,
+            last_automation_tick: u64::MAX,
+            pending: None,
+        }
+    }
+
+    pub fn new_sampler(
+        sample_rate: f32,
+        patch: Patch,
+        polyphony: usize,
+        data: Arc<SampleData>,
+        root_note: u8,
+    ) -> Self {
+        Self {
+            source: SoundSource::Sampler(Sampler::new(
+                sample_rate, polyphony, patch, data, root_note,
+            )),
+            slot: None,
+            gain: 1.0,
+            fx_chain: Vec::new(),
+            fx_enabled: Vec::new(),
+            automations: Vec::new(),
+            sample_rate,
+            loop_beats: None,
+            last_automation_tick: u64::MAX,
+            pending: None,
+        }
+    }
+
+    pub fn new_kit(
+        sample_rate: f32,
+        patch: Patch,
+        polyphony: usize,
+        map: HashMap<u8, Arc<SampleData>>,
+    ) -> Self {
+        Self {
+            source: SoundSource::Sampler(Sampler::new_kit(sample_rate, polyphony, patch, map)),
             slot: None,
             gain: 1.0,
             fx_chain: Vec::new(),
@@ -136,16 +272,25 @@ impl Track {
             .is_some_and(|s| s.active && s.player.loop_len.is_some())
     }
 
-    /// Apply a pending update immediately (used for non-looping tracks).
-    pub(crate) fn apply_update(&mut self, update: PendingUpdate, tempo: Tempo) {
-        self.synth.apply_patch(update.patch);
-        if let Some((effects, fx_enabled)) = update.effects {
-            self.fx_chain = effects;
+    /// Apply sound changes (patch, effects, automations) immediately.
+    pub(crate) fn apply_sound_update(
+        &mut self,
+        patch: Patch,
+        effects: Option<(Vec<Box<dyn crate::effects::Effect>>, Vec<bool>)>,
+        automations: Vec<Automation>,
+    ) {
+        self.source.apply_patch(patch);
+        if let Some((fx, fx_enabled)) = effects {
+            self.fx_chain = fx;
             self.fx_enabled = fx_enabled;
         }
-        self.automations = update.automations;
+        self.automations = automations;
         self.last_automation_tick = u64::MAX;
+    }
 
+    /// Apply timing changes (pattern_fn, loop_beats) immediately.
+    /// Used for non-looping tracks where there's no boundary to wait for.
+    pub(crate) fn apply_timing_update(&mut self, update: PendingTimingUpdate, tempo: Tempo) {
         if let Some(pf) = update.pattern_fn {
             if let Some(slot) = &mut self.slot {
                 slot.generator = Some(ClipGenerator {
@@ -165,7 +310,7 @@ impl Track {
         }
     }
 
-    /// Render one stereo frame for this track: dispatch events, render synth (mono),
+    /// Render one stereo frame for this track: dispatch events, render source (mono),
     /// widen to stereo, apply FX chain, apply gain.
     pub fn render_sample(&mut self, sample_idx: u64, tempo: Tempo) -> StereoFrame {
         let sample_rate = self.sample_rate;
@@ -176,20 +321,12 @@ impl Track {
                 let looped = slot.player.advance_loop(sample_idx);
 
                 if looped {
-                    self.synth.all_notes_off();
+                    self.source.all_notes_off();
                     slot.iteration += 1;
 
-                    // Apply pending hot-reload update at loop boundary
+                    // Apply pending timing update at loop boundary
                     if let Some(update) = self.pending.take() {
-                        debug!(iteration = slot.iteration, "applying update at loop boundary");
-                        self.synth.apply_patch(update.patch);
-                        if let Some((effects, fx_enabled)) = update.effects {
-                            self.fx_chain = effects;
-                            self.fx_enabled = fx_enabled;
-                        }
-                        self.automations = update.automations;
-                        self.last_automation_tick = u64::MAX;
-
+                        debug!(iteration = slot.iteration, "applying timing update at loop boundary");
                         if let Some(pf) = update.pattern_fn {
                             slot.generator = Some(ClipGenerator {
                                 func: pf,
@@ -217,7 +354,7 @@ impl Track {
                         break;
                     }
                     slot.player.pop();
-                    self.synth.apply_event(e.kind);
+                    self.source.apply_event(e.kind);
                 }
             }
         }
@@ -240,19 +377,19 @@ impl Track {
             for auto in &mut self.automations {
                 match auto(clock) {
                     AutoCmd::Synth(param, value) => {
-                        self.synth.set_param(param, value);
+                        self.source.set_param(param, value);
                     }
                     AutoCmd::FilterType(ft) => {
-                        self.synth.set_filter_type(ft);
+                        self.source.set_filter_type(ft);
                     }
                     AutoCmd::Retrigger(mode) => {
-                        self.synth.set_retrigger(mode);
+                        self.source.set_retrigger(mode);
                     }
                     AutoCmd::OscParam { osc_index, param, value } => {
-                        self.synth.set_osc_param(osc_index, param, value);
+                        self.source.set_osc_param(osc_index, param, value);
                     }
                     AutoCmd::OscWaveform { osc_index, waveform } => {
-                        self.synth.set_osc_waveform(osc_index, waveform);
+                        self.source.set_osc_waveform(osc_index, waveform);
                     }
                     AutoCmd::FxParam { fx_index, slot, value } => {
                         if let Some(fx) = self.fx_chain.get_mut(fx_index) {
@@ -268,8 +405,8 @@ impl Track {
             }
         }
 
-        // Render synth (mono) and widen to stereo
-        let mono = self.synth.render_sample();
+        // Render source (mono) and widen to stereo
+        let mono = self.source.render_sample();
         let mut frame: StereoFrame = [mono, mono];
 
         // Apply FX chain (stereo), skipping disabled effects

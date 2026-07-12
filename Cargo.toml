@@ -14,5 +14,6 @@ rand = "0.10.0"
 subsecond = { version = "0.7", optional = true }
 dioxus-devtools = { version = "0.7", optional = true }
 midir = { version = "0.10", optional = true }
+hound = "3.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

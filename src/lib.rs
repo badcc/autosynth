@@ -13,6 +13,8 @@ pub mod oscillator;
 pub mod patch;
 pub mod pattern;
 pub mod prelude;
+pub mod sample;
+pub mod sampler;
 #[cfg(feature = "live")]
 pub(crate) mod midi;
 #[cfg(feature = "live")]

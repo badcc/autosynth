@@ -144,6 +144,23 @@ impl Phrase {
         self
     }
 
+    /// Step-sequencer style pattern. Each character = one 16th note (0.25 beats).
+    /// `x` = hit at `vel`, `X` = accent at `(vel * 1.3).min(1.0)`, anything else = rest.
+    pub fn steps(&mut self, note: u8, pattern: &str, vel: f32) -> &mut Self {
+        let step = 0.25_f32; // 16th note
+        let dur = 0.225_f32; // 90% of step, slight gap
+        for (i, ch) in pattern.chars().enumerate() {
+            let v = match ch {
+                'x' => vel,
+                'X' => (vel * 1.3).min(1.0),
+                _ => continue,
+            };
+            let beat = i as f32 * step;
+            self.note(Time::Beats(beat), note, v, dur);
+        }
+        self
+    }
+
     pub(crate) fn into_events(self) -> Vec<(Time, EventKind)> {
         self.events
     }

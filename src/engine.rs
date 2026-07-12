@@ -1,13 +1,16 @@
+use std::collections::HashMap;
 use std::sync::mpsc;
+use std::sync::Arc;
 
 use tracing::debug;
 
 use crate::automation::{Automation, PatternFn};
 use crate::event::SynthParam;
 use crate::patch::Patch;
+use crate::sample::SampleData;
 use crate::score::{Score, Tempo};
 use crate::session::Session;
-use crate::track::PendingUpdate;
+use crate::track::PendingTimingUpdate;
 
 pub(crate) enum Command {
     // Track management
@@ -15,6 +18,19 @@ pub(crate) enum Command {
         name: String,
         patch: Patch,
         polyphony: usize,
+    },
+    AddSamplerTrack {
+        name: String,
+        patch: Patch,
+        polyphony: usize,
+        data: Arc<SampleData>,
+        root_note: u8,
+    },
+    AddKitTrack {
+        name: String,
+        patch: Patch,
+        polyphony: usize,
+        map: HashMap<u8, Arc<SampleData>>,
     },
     RemoveTrack(String),
 
@@ -95,6 +111,38 @@ impl EngineHandle {
             name: name.to_string(),
             patch,
             polyphony,
+        });
+    }
+
+    pub fn add_sampler_track(
+        &self,
+        name: &str,
+        patch: Patch,
+        polyphony: usize,
+        data: Arc<SampleData>,
+        root_note: u8,
+    ) {
+        let _ = self.tx.send(Command::AddSamplerTrack {
+            name: name.to_string(),
+            patch,
+            polyphony,
+            data,
+            root_note,
+        });
+    }
+
+    pub fn add_kit_track(
+        &self,
+        name: &str,
+        patch: Patch,
+        polyphony: usize,
+        map: HashMap<u8, Arc<SampleData>>,
+    ) {
+        let _ = self.tx.send(Command::AddKitTrack {
+            name: name.to_string(),
+            patch,
+            polyphony,
+            map,
         });
     }
 
@@ -279,6 +327,24 @@ impl Engine {
             } => {
                 self.session.add_track(name, patch, polyphony);
             }
+            Command::AddSamplerTrack {
+                name,
+                patch,
+                polyphony,
+                data,
+                root_note,
+            } => {
+                self.session
+                    .add_sampler_track(name, patch, polyphony, data, root_note);
+            }
+            Command::AddKitTrack {
+                name,
+                patch,
+                polyphony,
+                map,
+            } => {
+                self.session.add_kit_track(name, patch, polyphony, map);
+            }
             Command::RemoveTrack(name) => {
                 self.session.remove_track(&name);
             }
@@ -299,7 +365,7 @@ impl Engine {
             }
             Command::SetPatch { track, patch } => {
                 if let Some(t) = self.session.track_mut(&track) {
-                    t.synth.apply_patch(patch);
+                    t.source.apply_patch(patch);
                 }
             }
             Command::SetParam {
@@ -308,7 +374,7 @@ impl Engine {
                 value,
             } => {
                 if let Some(t) = self.session.track_mut(&track) {
-                    t.synth.set_param(param, value);
+                    t.source.set_param(param, value);
                 }
             }
             Command::SetAutomations {
@@ -346,33 +412,38 @@ impl Engine {
             } => {
                 let tempo = self.session.tempo();
                 if let Some(t) = self.session.track_mut(&track) {
-                    let update = PendingUpdate {
-                        patch,
-                        effects,
-                        automations,
-                        pattern_fn,
-                        loop_beats,
-                    };
-                    if t.has_active_loop() {
-                        debug!(track = %track, "queued pending update");
-                        t.pending = Some(update);
-                    } else {
-                        debug!(track = %track, "applied update immediately");
-                        t.apply_update(update, tempo);
+                    // Sound changes always apply immediately
+                    debug!(track = %track, "applying sound update immediately");
+                    t.apply_sound_update(patch, effects, automations);
+
+                    // Timing changes queue to loop boundary (if looping)
+                    let has_timing = pattern_fn.is_some() || loop_beats.is_some();
+                    if has_timing {
+                        let timing = PendingTimingUpdate {
+                            pattern_fn,
+                            loop_beats,
+                        };
+                        if t.has_active_loop() {
+                            debug!(track = %track, "queued timing update for loop boundary");
+                            t.pending = Some(timing);
+                        } else {
+                            debug!(track = %track, "applied timing update immediately");
+                            t.apply_timing_update(timing, tempo);
+                        }
                     }
                 }
             }
             Command::MidiNoteOn { note, vel } => {
                 if let Some(ref name) = self.midi_track {
                     if let Some(t) = self.session.track_mut(name) {
-                        t.synth.note_on(note, vel);
+                        t.source.note_on(note, vel);
                     }
                 }
             }
             Command::MidiNoteOff { note } => {
                 if let Some(ref name) = self.midi_track {
                     if let Some(t) = self.session.track_mut(name) {
-                        t.synth.note_off(note);
+                        t.source.note_off(note);
                     }
                 }
             }
