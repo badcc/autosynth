@@ -22,11 +22,11 @@ fn scene(s: &mut Scene) {
 }
 
 fn bass(t: &mut Track) {
-    t.osc(Waveform::Saw, 0.8);
-    t.cutoff(|c: Clock| 400.0 + 300.0 * c.sin(8.0));   // automation: a closure is a knob
+    t.osc(Saw, 0.8);
+    t.cutoff(sine(8.0).range(100.0, 700.0));   // automation: a shape (or a closure) is a knob
     t.every(8.0, |p| {
-        p.note(0.0, E1, 0.9, 2.0);
-        p.steps(E1, "x..x..x.", 0.7);
+        p.note(E1, N2);                        // placed at the cursor, which then advances
+        p.steps(E1, "x..x..x.");               // a 16th-grid rhythm from the cursor
     });
 }
 ```
@@ -207,7 +207,9 @@ iteration. Just before a boundary falls inside the current render block, the tra
 the closure for the *upcoming* iteration and stages the result; the scheduler swaps it in
 exactly at the boundary. Consequences:
 
-- `rand::` calls inside the closure naturally re-roll each loop.
+- `p.rand`/`p.pick`/`p.chance` re-roll each loop — the phrase RNG is reseeded per
+  iteration (see *Seeded pattern RNG* below), so patterns evolve live yet renders offline
+  bit-for-bit. (User-side `rand::` would break that, so the phrase carries its own.)
 - `p.iteration` and `p.beat` (the loop count and the global beat of the iteration's start)
   let patterns evolve: every 4th loop gets a fill, intensity ramps across iterations.
 - The closure runs inside `catch_unwind`. **A panic in your pattern logs an error and
@@ -231,6 +233,47 @@ scheduler's anchors each control period, never reverse-engineered from a sample 
 so it stays truthful across tempo changes and pattern swaps. `Clock` also carries the
 shape helpers most automations want: `c.phase(len)` (rising 0→1 ramp over `len` beats),
 `c.ramp(a, b, len)`, `c.sin(len)`, `c.tri(len)`.
+
+### Placing notes: the phrase cursor
+
+Inside `every(..)` you don't spell out an absolute beat for every note. A `Phrase` holds a
+**cursor** that starts at 0; `p.note(note, dur)` places a note there and advances the
+cursor by `dur`, so a run of notes reads as a melody. `p.at(beat)` jumps the cursor,
+`p.rest(dur)` advances it silently, and `p.vel(v)` sets the default velocity for
+subsequent notes. Each `note`/`chord` returns a small guard for per-note tweaks that
+chain: `.vel(v)` (this note), `.at(beat)` (reposition, cursor follows), `.step(adv)`
+(override how far the cursor advanced). A dotted-eighth shuffle is then
+`p.note(n, N8).step(N8.dotted())` — no `total_delay` accumulator, no parallel dur/delay
+arrays. `p.steps(note, "x.X.")` lays a 16th-grid rhythm (`X` = accent) from the cursor and
+advances past it; `p.pattern(&pat)` drops a reusable `Pattern` down and advances by its
+length.
+
+### Keys, degrees, durations
+
+Harmony is a first-class value: `Key::new(E4, MAJOR)` binds a root and a scale once, then
+`key.deg(d)` gives a scale degree (1-indexed and total over `i32` — `deg(8)` is the octave,
+`deg(0)` and negatives fall below the root, so there's no silent `deg(0) == deg(1)`
+footgun), and `key.triad(d)`/`key.seventh(d)` return chords with no allocation. Durations
+are consts named by fraction (`N1`, `N2`, `N4`, `N8`, `N16`, `N32`) with `.dotted()` /
+`.triplet()` modifiers and `bars(n)`.
+
+### Swing
+
+`t.swing(grid, amount)` (e.g. `t.swing(N16, 0.57)`; `0.5` is straight) is a *timing*
+property, so it rides the pattern/one-shot payloads rather than the value diff. It is
+applied in exactly one place — where phrase output becomes scheduler note-ons — by
+shifting every note that lands on an *odd* multiple of `grid` late by
+`(amount - 0.5) * 2 * grid` beats. No scheduler changes, and because patterns are already
+re-sent whenever the builder re-runs, no new diff logic either.
+
+### Seeded pattern RNG
+
+The phrase closure re-runs every loop, so its randomness must re-roll live yet stay
+reproducible offline. `Phrase` carries a tiny seeded xorshift32 (`music` depends on
+nothing below it): `p.rand(range)`, `p.pick(&[..])`, `p.chance(p)`. The seed is an
+FNV-1a hash of the track key, mixed with the iteration counter (`seed ^ splitmix64(it)`)
+before each regeneration — so successive loops differ, but two offline renders of the same
+scene produce byte-identical audio (§10).
 
 ## 5. The render path
 
@@ -313,14 +356,18 @@ from the current level with phase and filter untouched (no discontinuity — the
 
 ## 7. Parameters and automation
 
-Every knob in the API accepts either a number or a closure:
+Every knob in the API accepts a number, an automation shape, or a closure:
 
 ```rust
 t.cutoff(800.0);
-t.cutoff(|c: Clock| 1000.0 + 300.0 * (c.beat * 0.1).sin());
+t.cutoff(sine(40.0).range(0.0, 1000.0));                     // a pure-data shape
+t.cutoff(|c: Clock| 1000.0 + 300.0 * (c.beat * 0.1).sin());  // the closure escape hatch
 ```
 
-One method, both behaviors — resolved by the type system through `IntoVal`:
+Shapes (`sine`/`tri`/`saw`/`ramp`, with `.range(lo, hi)` and `.phase(frac)`) cover the
+common LFO/ramp automations without an annotated closure; a `Shape` is a small `Copy`
+struct whose `IntoVal<f32>` records it as an automation exactly like a closure. One method,
+all three behaviors — resolved by the type system through `IntoVal`:
 
 ```rust
 pub enum Val<T> { Fixed(T), Fn(Box<dyn FnMut(Clock) -> T + Send>) }
@@ -415,8 +462,10 @@ autosynth::render(120.0, scene, 16.0, "out.wav")?;   // 16 bars, same engine, no
 ```
 
 The scene function is evaluated once, commands drain on the first render call, and blocks
-are written straight to a WAV. Output is deterministic and sample-exact, which makes the
-interesting properties assertable in ordinary `cargo test`:
+are written straight to a WAV. Output is deterministic and sample-exact — including pattern
+randomness, because the phrase RNG is seeded from the track key and iteration rather than a
+global generator, so two renders of a scene using `p.rand` are byte-identical. That makes
+the interesting properties assertable in ordinary `cargo test`:
 
 - **Timing**: render N blocks, assert the exact sample position of every note-on and
   note-off — including across tempo changes, loop wraps, and boundary-queued pattern

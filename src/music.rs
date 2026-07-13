@@ -8,6 +8,8 @@ pub mod harmony;
 pub mod notes;
 pub mod pattern;
 pub mod phrase;
+pub mod shape;
 
 pub use clock::Clock;
-pub use phrase::{NoteSpec, Phrase};
+pub use phrase::{Note, NoteSpec, Phrase};
+pub use shape::Shape;

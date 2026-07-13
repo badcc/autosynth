@@ -3,6 +3,7 @@ use std::sync::mpsc;
 use crate::dsp::effects::Effect;
 use crate::engine::instrument::SampleSource;
 use crate::model::param::{Automation, PatternFn};
+use crate::model::track::Swing;
 use crate::model::PatchSpec;
 use crate::music::NoteSpec;
 
@@ -22,10 +23,11 @@ pub struct GroupBuild {
     pub fx_enabled: Vec<bool>,
 }
 
-/// What a track plays when created.
+/// What a track plays when created. Swing rides the timing payload so it is
+/// applied where phrase output becomes scheduler note-ons.
 pub enum Playback {
-    Pattern { func: PatternFn, loop_len: f64 },
-    OneShot(Vec<NoteSpec>),
+    Pattern { func: PatternFn, loop_len: f64, swing: Option<Swing> },
+    OneShot { notes: Vec<NoteSpec>, swing: Option<Swing> },
     Silent,
 }
 
@@ -42,6 +44,8 @@ pub struct TrackBuild {
     pub fx_enabled: Vec<bool>,
     pub automations: Vec<Automation>,
     pub playback: Playback,
+    /// Deterministic RNG seed for pattern regeneration (hash of the track key).
+    pub seed: u64,
 }
 
 /// Commands sent from the control thread to the engine. One `AddTrack` replaces
@@ -85,10 +89,12 @@ pub enum Command {
         track: String,
         func: PatternFn,
         loop_len: f64,
+        swing: Option<Swing>,
     },
     QueueOneShot {
         track: String,
         notes: Vec<NoteSpec>,
+        swing: Option<Swing>,
     },
 
     /// Replace the whole set of group buses. The scene ships the complete set

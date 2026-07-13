@@ -18,12 +18,21 @@ pub enum SourceSpec {
     Kit { slots: Vec<(u8, PathBuf)> },
 }
 
+/// Swing: shift every note that lands on an *odd* multiple of `grid` late by
+/// `(amount - 0.5) * 2 * grid` beats. `amount == 0.5` is straight timing. A
+/// *timing* property — it rides the pattern/one-shot payloads, not the diff.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Swing {
+    pub grid: f32,
+    pub amount: f32,
+}
+
 /// The complete, diffable description of one track for a single frame.
 ///
 /// The diffable fields (`source`, `patch`, `gain`, `pan`, `mute`, `fx`,
 /// `polyphony`, `loop_len`) drive hot-reload decisions. The closure/data fields
-/// (`pattern`, `one_shot`, `automations`) can't be value-compared, so they are
-/// resent whenever the builder re-runs.
+/// (`pattern`, `one_shot`, `automations`, `swing`) can't be value-compared (or
+/// are timing-scoped), so they are resent whenever the builder re-runs.
 pub struct TrackSpec {
     pub source: SourceSpec,
     pub patch: PatchSpec,
@@ -36,6 +45,7 @@ pub struct TrackSpec {
     pub pattern: Option<PatternFn>,
     pub one_shot: Vec<NoteSpec>,
     pub automations: Vec<Automation>,
+    pub swing: Option<Swing>,
 }
 
 impl Default for TrackSpec {
@@ -52,6 +62,7 @@ impl Default for TrackSpec {
             pattern: None,
             one_shot: Vec::new(),
             automations: Vec::new(),
+            swing: None,
         }
     }
 }

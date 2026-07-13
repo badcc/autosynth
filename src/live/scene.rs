@@ -1,5 +1,6 @@
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::PathBuf;
 
 use tracing::debug;
@@ -12,13 +13,10 @@ use crate::engine::command::{
     BuiltSource, Command, EngineHandle, GroupBuild, Playback, TrackBuild,
 };
 use crate::engine::instrument::SampleSource;
-use crate::live::fx_builder::{
-    ChorusBuilder, DelayBuilder, DistortionBuilder, FxResult, ReverbBuilder,
-};
-use crate::model::fx::FxSpec;
+use crate::model::fx::{FxKind, FxSpec};
 use crate::model::param::{IntoVal, ParamId, Val};
 use crate::model::patch::PatchSpec;
-use crate::model::track::{SourceSpec, TrackSpec};
+use crate::model::track::{SourceSpec, Swing, TrackSpec};
 use crate::music::{Clock, NoteSpec, Phrase};
 use crate::sample::SampleCache;
 
@@ -227,7 +225,7 @@ impl Scene {
         match self.prev.get(&id).cloned() {
             None => {
                 debug!(track = name, "add new track");
-                let build = self.make_build(spec);
+                let build = self.make_build(&key, spec);
                 self.handle.send(Command::AddTrack {
                     name: key.clone(),
                     build: Box::new(build),
@@ -239,7 +237,7 @@ impl Scene {
                 if new.source != prev.source || new.polyphony != prev.polyphony {
                     debug!(track = name, "source changed — rebuild");
                     self.handle.send(Command::RemoveTrack(key.clone()));
-                    let build = self.make_build(spec);
+                    let build = self.make_build(&key, spec);
                     self.handle.send(Command::AddTrack {
                         name: key.clone(),
                         build: Box::new(build),
@@ -263,6 +261,7 @@ impl Scene {
             pattern,
             one_shot,
             automations,
+            swing,
             ..
         } = spec;
 
@@ -303,7 +302,7 @@ impl Scene {
         });
 
         // Timing changes queue to the loop boundary.
-        self.send_timing(key, pattern, loop_len, one_shot);
+        self.send_timing(key, pattern, loop_len, one_shot, swing);
     }
 
     fn send_timing(
@@ -312,16 +311,19 @@ impl Scene {
         pattern: Option<crate::model::param::PatternFn>,
         loop_len: Option<f32>,
         one_shot: Vec<NoteSpec>,
+        swing: Option<Swing>,
     ) {
         match (pattern, loop_len) {
             (Some(func), Some(len)) => self.handle.send(Command::QueuePattern {
                 track: key.to_string(),
                 func,
                 loop_len: len as f64,
+                swing,
             }),
             _ if !one_shot.is_empty() => self.handle.send(Command::QueueOneShot {
                 track: key.to_string(),
                 notes: one_shot,
+                swing,
             }),
             _ => {}
         }
@@ -329,15 +331,20 @@ impl Scene {
 
     // ── Build helpers ──
 
-    fn make_build(&mut self, spec: TrackSpec) -> TrackBuild {
+    fn make_build(&mut self, key: &str, spec: TrackSpec) -> TrackBuild {
         let source = self.resolve_source(spec.source);
         let (fx, fx_enabled) = self.build_fx(&spec.fx);
+        let swing = spec.swing;
         let playback = match (spec.pattern, spec.loop_len) {
             (Some(func), Some(len)) => Playback::Pattern {
                 func,
                 loop_len: len as f64,
+                swing,
             },
-            _ if !spec.one_shot.is_empty() => Playback::OneShot(spec.one_shot),
+            _ if !spec.one_shot.is_empty() => Playback::OneShot {
+                notes: spec.one_shot,
+                swing,
+            },
             _ => Playback::Silent,
         };
         TrackBuild {
@@ -351,6 +358,7 @@ impl Scene {
             fx_enabled,
             automations: spec.automations,
             playback,
+            seed: hash_key(key),
         }
     }
 
@@ -400,6 +408,17 @@ impl Scene {
 
 fn fx_only_enabled_changed(a: &[FxSpec], b: &[FxSpec]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.kind == y.kind)
+}
+
+/// FNV-1a hash of the track key — a stable per-track RNG seed so pattern
+/// regeneration re-rolls per iteration yet renders bit-reproducibly.
+fn hash_key(key: &str) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for b in key.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 // ── SceneTrack: the one builder surface ──
@@ -477,7 +496,21 @@ impl SceneTrack {
         self.val(v, ParamId::LfoDepth, |s, f| s.patch.lfo_depth = f);
     }
 
-    pub fn filter_type(&mut self, ft: FilterType) {
+    /// Convenience: set the full ADSR envelope in one call.
+    pub fn adsr(
+        &mut self,
+        a: impl IntoVal<f32>,
+        d: impl IntoVal<f32>,
+        s: impl IntoVal<f32>,
+        r: impl IntoVal<f32>,
+    ) {
+        self.attack(a);
+        self.decay(d);
+        self.sustain(s);
+        self.release(r);
+    }
+
+    pub fn filter(&mut self, ft: FilterType) {
         self.spec.patch.filter_type = ft;
     }
     pub fn retrigger(&mut self, mode: RetriggerMode) {
@@ -485,6 +518,12 @@ impl SceneTrack {
     }
     pub fn polyphony(&mut self, n: usize) {
         self.spec.polyphony = n;
+    }
+
+    /// Swing: shift notes on odd multiples of `grid` late by `amount`. `0.5` is
+    /// straight; `0.57` a gentle shuffle. See [`Swing`](crate::model::Swing).
+    pub fn swing(&mut self, grid: f32, amount: f32) {
+        self.spec.swing = Some(Swing { grid, amount });
     }
 
     // ── Mixer ──
@@ -542,40 +581,42 @@ impl SceneTrack {
         }
     }
 
-    // ── Effects ──
+    // ── Effects (constructors live in fx_builder.rs; these are the shared
+    // mutation helpers the builders call) ──
 
-    fn push_fx(&mut self, result: FxResult) {
-        let index = self.spec.fx.len();
-        self.spec.fx.push(FxSpec {
-            kind: result.kind,
-            enabled: result.enabled,
-        });
-        for (slot, f) in result.automations {
-            self.spec
-                .automations
-                .push((ParamId::Fx { index, slot }, f));
+    /// Push a default fx of the given kind and return its index.
+    pub(crate) fn push_fx_default(&mut self, kind: FxKind) -> usize {
+        let idx = self.spec.fx.len();
+        self.spec.fx.push(FxSpec { kind, enabled: true });
+        idx
+    }
+
+    /// Set an fx parameter from a `Val`, recording an `Fx { index, slot }`
+    /// automation when it is a closure/shape. `apply` writes the fixed value
+    /// into the effect's config.
+    pub(crate) fn fx_param(
+        &mut self,
+        index: usize,
+        slot: u8,
+        v: impl IntoVal<f32>,
+        apply: impl FnOnce(&mut FxKind, f32),
+    ) {
+        match v.into_val() {
+            Val::Fixed(f) => apply(&mut self.spec.fx[index].kind, f),
+            Val::Fn(mut f) => {
+                let init = f(Clock::ZERO);
+                apply(&mut self.spec.fx[index].kind, init);
+                self.spec.automations.push((ParamId::Fx { index, slot }, f));
+            }
         }
     }
 
-    pub fn delay(&mut self, f: impl FnOnce(&mut DelayBuilder)) {
-        let mut b = DelayBuilder::new();
-        f(&mut b);
-        self.push_fx(b.finish());
+    pub(crate) fn fx_kind_mut(&mut self, index: usize) -> &mut FxKind {
+        &mut self.spec.fx[index].kind
     }
-    pub fn chorus(&mut self, f: impl FnOnce(&mut ChorusBuilder)) {
-        let mut b = ChorusBuilder::new();
-        f(&mut b);
-        self.push_fx(b.finish());
-    }
-    pub fn distortion(&mut self, f: impl FnOnce(&mut DistortionBuilder)) {
-        let mut b = DistortionBuilder::new();
-        f(&mut b);
-        self.push_fx(b.finish());
-    }
-    pub fn reverb(&mut self, f: impl FnOnce(&mut ReverbBuilder)) {
-        let mut b = ReverbBuilder::new();
-        f(&mut b);
-        self.push_fx(b.finish());
+
+    pub(crate) fn set_fx_enabled_flag(&mut self, index: usize, on: bool) {
+        self.spec.fx[index].enabled = on;
     }
 
     // ── Playback ──
@@ -585,19 +626,45 @@ impl SceneTrack {
         self.spec.pattern = Some(Box::new(f));
     }
 
-    pub fn note(&mut self, beat: f32, note: u8, vel: f32, dur: f32) {
-        self.spec.one_shot.push(NoteSpec {
-            beat,
-            note,
-            vel,
-            dur,
-        });
+    /// Play a single note (defaults: beat 0.0, velocity 0.8). Chain `.at(beat)`
+    /// / `.vel(v)` on the returned guard.
+    pub fn note(&mut self, note: u8, dur: f32) -> OneShotNote<'_> {
+        let idx = self.spec.one_shot.len();
+        self.spec.one_shot.push(NoteSpec { beat: 0.0, note, vel: 0.8, dur });
+        OneShotNote { one_shot: &mut self.spec.one_shot, range: idx..idx + 1 }
     }
 
-    pub fn chord(&mut self, beat: f32, notes: &[u8], vel: f32, dur: f32) {
+    /// Play a chord (defaults: beat 0.0, velocity 0.8).
+    pub fn chord(&mut self, notes: &[u8], dur: f32) -> OneShotNote<'_> {
+        let idx = self.spec.one_shot.len();
         for &n in notes {
-            self.note(beat, n, vel, dur);
+            self.spec.one_shot.push(NoteSpec { beat: 0.0, note: n, vel: 0.8, dur });
         }
+        let end = self.spec.one_shot.len();
+        OneShotNote { one_shot: &mut self.spec.one_shot, range: idx..end }
+    }
+}
+
+/// Guard over a one-shot note/chord: `.at(beat)` repositions, `.vel(v)` sets
+/// velocity. Mirrors [`Phrase`](crate::music::Phrase)'s note guard.
+pub struct OneShotNote<'a> {
+    one_shot: &'a mut Vec<NoteSpec>,
+    range: Range<usize>,
+}
+
+impl OneShotNote<'_> {
+    pub fn at(self, beat: f32) -> Self {
+        for n in &mut self.one_shot[self.range.clone()] {
+            n.beat = beat;
+        }
+        self
+    }
+
+    pub fn vel(self, v: f32) -> Self {
+        for n in &mut self.one_shot[self.range.clone()] {
+            n.vel = v;
+        }
+        self
     }
 }
 
@@ -657,32 +724,16 @@ impl GroupBuilder {
         self.gain = g;
     }
 
-    fn push_fx(&mut self, result: FxResult) {
-        self.fx.push(FxSpec {
-            kind: result.kind,
-            enabled: result.enabled,
-        });
+    /// Push a default fx of the given kind and return its index. Group fx take
+    /// plain `f32` setters — automation is unsupported on buses by construction.
+    pub(crate) fn push_fx_default(&mut self, kind: FxKind) -> usize {
+        let idx = self.fx.len();
+        self.fx.push(FxSpec { kind, enabled: true });
+        idx
     }
 
-    pub fn delay(&mut self, f: impl FnOnce(&mut DelayBuilder)) {
-        let mut b = DelayBuilder::new();
-        f(&mut b);
-        self.push_fx(b.finish());
-    }
-    pub fn chorus(&mut self, f: impl FnOnce(&mut ChorusBuilder)) {
-        let mut b = ChorusBuilder::new();
-        f(&mut b);
-        self.push_fx(b.finish());
-    }
-    pub fn distortion(&mut self, f: impl FnOnce(&mut DistortionBuilder)) {
-        let mut b = DistortionBuilder::new();
-        f(&mut b);
-        self.push_fx(b.finish());
-    }
-    pub fn reverb(&mut self, f: impl FnOnce(&mut ReverbBuilder)) {
-        let mut b = ReverbBuilder::new();
-        f(&mut b);
-        self.push_fx(b.finish());
+    pub(crate) fn fx_mut(&mut self) -> &mut Vec<FxSpec> {
+        &mut self.fx
     }
 }
 
@@ -703,8 +754,12 @@ mod tests {
     #[test]
     fn enabled_toggle_is_visible_in_the_diff() {
         // Defect 4: a static `.enabled(false)` must be a visible spec change.
-        let a = spec(|t| t.delay(|d| { d.enabled(true); }));
-        let b = spec(|t| t.delay(|d| { d.enabled(false); }));
+        let a = spec(|t| {
+            t.delay().enabled(true);
+        });
+        let b = spec(|t| {
+            t.delay().enabled(false);
+        });
         let (da, db) = (TrackDiff::of(&a), TrackDiff::of(&b));
         assert_ne!(da.fx, db.fx);
         assert!(fx_only_enabled_changed(&da.fx, &db.fx));
@@ -712,9 +767,29 @@ mod tests {
 
     #[test]
     fn fx_param_change_is_not_enabled_only() {
-        let a = spec(|t| t.delay(|d| { d.feedback(0.2); }));
-        let b = spec(|t| t.delay(|d| { d.feedback(0.5); }));
+        let a = spec(|t| {
+            t.delay().feedback(0.2);
+        });
+        let b = spec(|t| {
+            t.delay().feedback(0.5);
+        });
         assert!(!fx_only_enabled_changed(&TrackDiff::of(&a).fx, &TrackDiff::of(&b).fx));
+    }
+
+    #[test]
+    fn shape_records_an_automation() {
+        // A `Shape` passed to a param seeds a static value and records an auto.
+        use crate::music::shape::sine;
+        let s = spec(|t| t.cutoff(sine(40.0).range(0.0, 1000.0)));
+        assert_eq!(s.automations.len(), 1);
+        assert_eq!(s.automations[0].0, ParamId::Cutoff);
+        assert!((s.patch.cutoff - 500.0).abs() < 1e-2, "seeded from Clock::ZERO");
+    }
+
+    #[test]
+    fn swing_is_recorded_on_the_spec() {
+        let s = spec(|t| t.swing(0.25, 0.57));
+        assert_eq!(s.swing, Some(Swing { grid: 0.25, amount: 0.57 }));
     }
 
     #[test]

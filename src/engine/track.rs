@@ -7,14 +7,15 @@ use crate::engine::mixer::pan_mono;
 use crate::engine::scheduler::{Fired, NoteEv, Scheduler};
 use crate::dsp::StereoFrame;
 use crate::model::param::{Automation, ParamId, PatternFn};
+use crate::model::track::Swing;
 use crate::model::PatchSpec;
 use crate::music::{NoteSpec, Phrase};
 
 /// A timing change queued by a hot-reload, applied at the next loop boundary
 /// (or immediately if the track isn't looping).
 pub enum Pending {
-    Pattern { func: PatternFn, loop_len: f64 },
-    OneShot(Vec<NoteSpec>),
+    Pattern { func: PatternFn, loop_len: f64, swing: Option<Swing> },
+    OneShot { notes: Vec<NoteSpec>, swing: Option<Swing> },
 }
 
 /// A running track: a sound generator, a scheduler, an fx chain, and mixer
@@ -31,6 +32,10 @@ pub struct Track {
     pattern: Option<PatternFn>,
     loop_len: Option<f64>,
     pending: Option<Pending>,
+    /// Swing in effect for the current pattern (applied on each regeneration).
+    swing: Option<Swing>,
+    /// Deterministic seed for pattern RNG (hash of the track key).
+    seed: u64,
     sample_rate: f32,
     // Preallocated scratch, reused every block (no per-block allocation).
     mono: Vec<f32>,
@@ -51,10 +56,17 @@ impl Track {
             pattern: None,
             loop_len: None,
             pending: None,
+            swing: None,
+            seed: 0,
             sample_rate,
             mono: Vec::new(),
             events: Vec::new(),
         }
+    }
+
+    /// Set the deterministic RNG seed used for pattern regeneration.
+    pub fn set_seed(&mut self, seed: u64) {
+        self.seed = seed;
     }
 
     pub fn new_synth(
@@ -116,28 +128,32 @@ impl Track {
     // ── Timing-speed updates (queue to boundary) ──
 
     /// Launch a pattern immediately (used on track creation).
-    pub fn launch_pattern(&mut self, mut func: PatternFn, loop_len: f64, now: f64) {
-        let ons = run_pattern(&mut func, now as f32, 0).unwrap_or_default();
+    pub fn launch_pattern(&mut self, mut func: PatternFn, loop_len: f64, now: f64, swing: Option<Swing>) {
+        self.swing = swing;
+        let mut ons = run_pattern(&mut func, now as f32, 0, self.seed).unwrap_or_default();
+        apply_swing(&mut ons, swing);
         self.pattern = Some(func);
         self.loop_len = Some(loop_len);
         self.scheduler.launch(ons, Some(loop_len), now);
     }
 
     /// Launch one-shot notes immediately (used on track creation).
-    pub fn launch_oneshot(&mut self, notes: Vec<NoteSpec>, now: f64) {
+    pub fn launch_oneshot(&mut self, mut notes: Vec<NoteSpec>, now: f64, swing: Option<Swing>) {
+        apply_swing(&mut notes, swing);
         self.pattern = None;
         self.loop_len = None;
+        self.swing = None;
         self.scheduler.launch(notes, None, now);
     }
 
     /// Queue a pattern swap for the next loop boundary.
-    pub fn queue_pattern(&mut self, func: PatternFn, loop_len: f64) {
-        self.pending = Some(Pending::Pattern { func, loop_len });
+    pub fn queue_pattern(&mut self, func: PatternFn, loop_len: f64, swing: Option<Swing>) {
+        self.pending = Some(Pending::Pattern { func, loop_len, swing });
     }
 
     /// Queue a one-shot phrase swap for the next loop boundary.
-    pub fn queue_oneshot(&mut self, notes: Vec<NoteSpec>) {
-        self.pending = Some(Pending::OneShot(notes));
+    pub fn queue_oneshot(&mut self, notes: Vec<NoteSpec>, swing: Option<Swing>) {
+        self.pending = Some(Pending::OneShot { notes, swing });
     }
 
     pub fn stop(&mut self) {
@@ -269,26 +285,31 @@ impl Track {
             let boundary = self.scheduler.next_boundary().unwrap_or(b0);
             let next_it = self.scheduler.iteration() + 1;
             match pending {
-                Pending::Pattern { mut func, loop_len } => {
-                    let ons = run_pattern(&mut func, boundary as f32, next_it).unwrap_or_default();
+                Pending::Pattern { mut func, loop_len, swing } => {
+                    self.swing = swing;
+                    let mut ons =
+                        run_pattern(&mut func, boundary as f32, next_it, self.seed).unwrap_or_default();
+                    apply_swing(&mut ons, swing);
                     self.pattern = Some(func);
                     self.loop_len = Some(loop_len);
                     self.scheduler.queue(ons, Some(loop_len), true, b0);
                 }
-                Pending::OneShot(notes) => {
+                Pending::OneShot { mut notes, swing } => {
+                    apply_swing(&mut notes, swing);
                     self.pattern = None;
                     self.loop_len = None;
+                    self.swing = None;
                     self.scheduler.queue(notes, None, true, b0);
                 }
             }
         } else {
             // Nothing to wait for — relaunch now.
             match pending {
-                Pending::Pattern { func, loop_len } => {
-                    self.launch_pattern(func, loop_len, b0);
+                Pending::Pattern { func, loop_len, swing } => {
+                    self.launch_pattern(func, loop_len, b0, swing);
                 }
-                Pending::OneShot(notes) => {
-                    self.launch_oneshot(notes, b0);
+                Pending::OneShot { notes, swing } => {
+                    self.launch_oneshot(notes, b0, swing);
                 }
             }
         }
@@ -306,19 +327,24 @@ impl Track {
         }
         let next_it = self.scheduler.iteration() + 1;
         let loop_len = self.loop_len;
+        let seed = self.seed;
+        let swing = self.swing;
         if let Some(pat) = &mut self.pattern
-            && let Some(ons) = run_pattern(pat, boundary as f32, next_it)
+            && let Some(mut ons) = run_pattern(pat, boundary as f32, next_it, seed)
         {
+            apply_swing(&mut ons, swing);
             self.scheduler.queue(ons, loop_len, false, b0);
         }
     }
 }
 
 /// Run a pattern closure, catching panics so a broken edit keeps the previous
-/// loop playing instead of killing the audio thread.
-fn run_pattern(func: &mut PatternFn, beat: f32, iteration: u32) -> Option<Vec<NoteSpec>> {
+/// loop playing instead of killing the audio thread. The phrase RNG is seeded
+/// from the track seed mixed with the iteration, so each loop re-rolls while
+/// offline renders stay bit-reproducible.
+fn run_pattern(func: &mut PatternFn, beat: f32, iteration: u32, seed: u64) -> Option<Vec<NoteSpec>> {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut phrase = Phrase::with_context(beat, iteration);
+        let mut phrase = Phrase::with_context(beat, iteration, seed ^ mix(iteration));
         func(&mut phrase);
         phrase.into_notes()
     }));
@@ -327,6 +353,35 @@ fn run_pattern(func: &mut PatternFn, beat: f32, iteration: u32) -> Option<Vec<No
         Err(_) => {
             tracing::error!("pattern closure panicked — keeping previous loop");
             None
+        }
+    }
+}
+
+/// SplitMix64 finalizer — decorrelates successive iterations before they mix
+/// into the seed, so consecutive loops don't produce near-identical RNG streams.
+fn mix(iteration: u32) -> u64 {
+    let mut z = (iteration as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Shift notes on odd multiples of the swing grid later, giving a straight
+/// pattern its shuffle. `amount == 0.5` is a no-op. Applied in exactly one place
+/// — where phrase output becomes scheduler note-ons.
+fn apply_swing(notes: &mut [NoteSpec], swing: Option<Swing>) {
+    let Some(Swing { grid, amount }) = swing else {
+        return;
+    };
+    if grid <= 0.0 {
+        return;
+    }
+    let shift = (amount - 0.5) * 2.0 * grid;
+    for n in notes {
+        let k = (n.beat / grid).round();
+        let on_grid = (n.beat - k * grid).abs() < 1e-4;
+        if on_grid && (k as i64).rem_euclid(2) == 1 {
+            n.beat += shift;
         }
     }
 }

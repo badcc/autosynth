@@ -200,14 +200,15 @@ impl Engine {
                 track,
                 func,
                 loop_len,
+                swing,
             } => {
                 if let Some(t) = self.tracks.get_mut(&track) {
-                    t.queue_pattern(func, loop_len);
+                    t.queue_pattern(func, loop_len, swing);
                 }
             }
-            Command::QueueOneShot { track, notes } => {
+            Command::QueueOneShot { track, notes, swing } => {
                 if let Some(t) = self.tracks.get_mut(&track) {
-                    t.queue_oneshot(notes);
+                    t.queue_oneshot(notes, swing);
                 }
             }
             Command::SetGroups(groups) => {
@@ -263,6 +264,7 @@ impl Engine {
             fx_enabled,
             automations,
             playback,
+            seed,
         } = build;
 
         let mut track = match source {
@@ -274,11 +276,14 @@ impl Engine {
             }
         };
         track.mute = mute;
+        track.set_seed(seed);
         track.set_fx(fx, fx_enabled);
         track.set_automations(automations);
         match playback {
-            Playback::Pattern { func, loop_len } => track.launch_pattern(func, loop_len, now),
-            Playback::OneShot(notes) => track.launch_oneshot(notes, now),
+            Playback::Pattern { func, loop_len, swing } => {
+                track.launch_pattern(func, loop_len, now, swing)
+            }
+            Playback::OneShot { notes, swing } => track.launch_oneshot(notes, now, swing),
             Playback::Silent => {}
         }
         track

@@ -1,266 +1,243 @@
-//! Fluent builders for the four effects. Each produces a diffable `FxKind`
-//! config plus any parameter automations, using the same `IntoVal` sugar as the
-//! synth params: `d.feedback(0.4)` or `d.feedback(|c| c.sin(4.0))`.
+//! Fluent effect builders. Each `t.delay()` pushes a default `FxSpec` onto the
+//! track immediately and returns a builder that borrows the track plus its fx
+//! index; setters mutate that spec in place and record automations directly.
+//! Same eager, chain-by-value style as `OscBuilder` — no closure form, no
+//! `Drop` magic.
+//!
+//! Track builders take `impl IntoVal<f32>`, so a knob can be a number or a
+//! `Clock` closure / `Shape`. Group builders take plain `f32`: group fx
+//! automation is unsupported, so it is rejected by construction rather than
+//! silently dropped.
 
 use crate::dsp::effects::{DelayMode, DistortionMode};
+use crate::live::scene::{GroupBuilder, SceneTrack};
 use crate::model::fx::{
-    ChorusCfg, DelayCfg, DistortionCfg, FxKind, ReverbCfg, chorus_slots, delay_slots,
+    ChorusCfg, DelayCfg, DistortionCfg, FxKind, FxSpec, ReverbCfg, chorus_slots, delay_slots,
     distortion_slots, reverb_slots,
 };
-use crate::model::param::{AutomationFn, IntoVal, Val};
+use crate::model::param::IntoVal;
 
-/// The result of an fx builder: its config, enable flag, and slot automations.
-pub struct FxResult {
-    pub kind: FxKind,
-    pub enabled: bool,
-    pub automations: Vec<(u8, AutomationFn)>,
-}
+/// Generate a track builder (IntoVal setters + automation) and a group builder
+/// (plain-`f32` setters) for one effect. Effect-specific setters (modes, timing)
+/// are written by hand in additional `impl` blocks below.
+macro_rules! fx_builder {
+    (
+        variant = $variant:ident, cfg = $cfg:ty, slots = $slots:ident,
+        track = $tb:ident, group = $gb:ident,
+        auto = [ $($method:ident => $field:ident @ $slot:ident),* $(,)? ]
+    ) => {
+        // ── Track builder: borrows the track, records automations ──
+        pub struct $tb<'a> {
+            pub(crate) track: &'a mut SceneTrack,
+            pub(crate) idx: usize,
+        }
 
-/// Set a config field from a `Val`, recording the automation if it's a closure.
-macro_rules! set_param {
-    ($self:ident, $field:expr, $slot:expr, $v:expr) => {
-        match $v.into_val() {
-            Val::Fixed(f) => $field = f,
-            Val::Fn(mut f) => {
-                $field = f(crate::music::Clock::ZERO);
-                $self.automations.push(($slot, f));
+        impl $tb<'_> {
+            $(
+                pub fn $method(self, v: impl IntoVal<f32>) -> Self {
+                    self.track.fx_param(self.idx, $slots::$slot, v, |k, f| {
+                        if let FxKind::$variant(c) = k {
+                            c.$field = f;
+                        }
+                    });
+                    self
+                }
+            )*
+
+            /// Enable or disable this effect (buffers are preserved when only the
+            /// flag changes).
+            pub fn enabled(self, on: bool) -> Self {
+                self.track.set_fx_enabled_flag(self.idx, on);
+                self
+            }
+        }
+
+        // ── Group builder: plain f32, no automation ──
+        pub struct $gb<'a> {
+            pub(crate) fx: &'a mut Vec<FxSpec>,
+            pub(crate) idx: usize,
+        }
+
+        impl $gb<'_> {
+            fn cfg(&mut self) -> &mut $cfg {
+                match &mut self.fx[self.idx].kind {
+                    FxKind::$variant(c) => c,
+                    _ => unreachable!("group fx index mismatch"),
+                }
+            }
+
+            $(
+                pub fn $method(mut self, v: f32) -> Self {
+                    self.cfg().$field = v;
+                    self
+                }
+            )*
+
+            pub fn enabled(self, on: bool) -> Self {
+                self.fx[self.idx].enabled = on;
+                self
             }
         }
     };
 }
 
-// ── Delay ──
-
-pub struct DelayBuilder {
-    cfg: DelayCfg,
-    enabled: bool,
-    automations: Vec<(u8, AutomationFn)>,
+fx_builder! {
+    variant = Delay, cfg = DelayCfg, slots = delay_slots,
+    track = DelayBuilder, group = GroupDelayBuilder,
+    auto = [ feedback => feedback @ PARAM_FEEDBACK, mix => mix @ PARAM_MIX ]
 }
 
-impl DelayBuilder {
-    pub(crate) fn new() -> Self {
-        Self {
-            cfg: DelayCfg::default(),
-            enabled: true,
-            automations: Vec::new(),
-        }
-    }
-
-    pub fn beats(&mut self, b: f32) -> &mut Self {
-        self.cfg.beats = Some(b);
-        self.cfg.seconds = None;
-        self
-    }
-
-    pub fn seconds(&mut self, s: f32) -> &mut Self {
-        self.cfg.seconds = Some(s);
-        self.cfg.beats = None;
-        self
-    }
-
-    pub fn feedback(&mut self, v: impl IntoVal<f32>) -> &mut Self {
-        set_param!(self, self.cfg.feedback, delay_slots::PARAM_FEEDBACK, v);
-        self
-    }
-
-    pub fn mix(&mut self, v: impl IntoVal<f32>) -> &mut Self {
-        set_param!(self, self.cfg.mix, delay_slots::PARAM_MIX, v);
-        self
-    }
-
-    pub fn ping_pong(&mut self) -> &mut Self {
-        self.cfg.mode = DelayMode::PingPong;
-        self
-    }
-
-    pub fn enabled(&mut self, on: bool) -> &mut Self {
-        self.enabled = on;
-        self
-    }
-
-    pub(crate) fn finish(self) -> FxResult {
-        FxResult {
-            kind: FxKind::Delay(self.cfg),
-            enabled: self.enabled,
-            automations: self.automations,
-        }
-    }
+fx_builder! {
+    variant = Chorus, cfg = ChorusCfg, slots = chorus_slots,
+    track = ChorusBuilder, group = GroupChorusBuilder,
+    auto = [ rate => rate @ PARAM_RATE, depth => depth @ PARAM_DEPTH, mix => mix @ PARAM_MIX ]
 }
 
-// ── Chorus ──
-
-pub struct ChorusBuilder {
-    cfg: ChorusCfg,
-    enabled: bool,
-    automations: Vec<(u8, AutomationFn)>,
+fx_builder! {
+    variant = Distortion, cfg = DistortionCfg, slots = distortion_slots,
+    track = DistortionBuilder, group = GroupDistortionBuilder,
+    auto = [
+        drive => drive @ PARAM_DRIVE,
+        mix => mix @ PARAM_MIX,
+        bias => bias @ PARAM_BIAS,
+        tone => tone @ PARAM_TONE,
+        output => output_gain @ PARAM_OUTPUT,
+    ]
 }
 
-impl ChorusBuilder {
-    pub(crate) fn new() -> Self {
-        Self {
-            cfg: ChorusCfg::default(),
-            enabled: true,
-            automations: Vec::new(),
+fx_builder! {
+    variant = Reverb, cfg = ReverbCfg, slots = reverb_slots,
+    track = ReverbBuilder, group = GroupReverbBuilder,
+    auto = [
+        size => size @ PARAM_SIZE,
+        damp => damp @ PARAM_DAMP,
+        mix => mix @ PARAM_MIX,
+        width => width @ PARAM_WIDTH,
+    ]
+}
+
+// ── Effect-specific (non-automatable) setters ──
+
+impl DelayBuilder<'_> {
+    pub fn beats(self, b: f32) -> Self {
+        if let FxKind::Delay(c) = self.track.fx_kind_mut(self.idx) {
+            c.beats = Some(b);
+            c.seconds = None;
         }
-    }
-
-    pub fn rate(&mut self, v: impl IntoVal<f32>) -> &mut Self {
-        set_param!(self, self.cfg.rate, chorus_slots::PARAM_RATE, v);
         self
     }
-
-    pub fn depth(&mut self, v: impl IntoVal<f32>) -> &mut Self {
-        set_param!(self, self.cfg.depth, chorus_slots::PARAM_DEPTH, v);
-        self
-    }
-
-    pub fn mix(&mut self, v: impl IntoVal<f32>) -> &mut Self {
-        set_param!(self, self.cfg.mix, chorus_slots::PARAM_MIX, v);
-        self
-    }
-
-    pub fn enabled(&mut self, on: bool) -> &mut Self {
-        self.enabled = on;
-        self
-    }
-
-    pub(crate) fn finish(self) -> FxResult {
-        FxResult {
-            kind: FxKind::Chorus(self.cfg),
-            enabled: self.enabled,
-            automations: self.automations,
+    pub fn seconds(self, s: f32) -> Self {
+        if let FxKind::Delay(c) = self.track.fx_kind_mut(self.idx) {
+            c.seconds = Some(s);
+            c.beats = None;
         }
+        self
+    }
+    pub fn ping_pong(self) -> Self {
+        if let FxKind::Delay(c) = self.track.fx_kind_mut(self.idx) {
+            c.mode = DelayMode::PingPong;
+        }
+        self
     }
 }
 
-// ── Distortion ──
-
-pub struct DistortionBuilder {
-    cfg: DistortionCfg,
-    enabled: bool,
-    automations: Vec<(u8, AutomationFn)>,
-}
-
-impl DistortionBuilder {
-    pub(crate) fn new() -> Self {
-        Self {
-            cfg: DistortionCfg::default(),
-            enabled: true,
-            automations: Vec::new(),
-        }
-    }
-
-    pub fn drive(&mut self, v: impl IntoVal<f32>) -> &mut Self {
-        set_param!(self, self.cfg.drive, distortion_slots::PARAM_DRIVE, v);
+impl GroupDelayBuilder<'_> {
+    pub fn beats(mut self, b: f32) -> Self {
+        let c = self.cfg();
+        c.beats = Some(b);
+        c.seconds = None;
         self
     }
-
-    pub fn mix(&mut self, v: impl IntoVal<f32>) -> &mut Self {
-        set_param!(self, self.cfg.mix, distortion_slots::PARAM_MIX, v);
+    pub fn seconds(mut self, s: f32) -> Self {
+        let c = self.cfg();
+        c.seconds = Some(s);
+        c.beats = None;
         self
     }
-
-    pub fn bias(&mut self, v: impl IntoVal<f32>) -> &mut Self {
-        set_param!(self, self.cfg.bias, distortion_slots::PARAM_BIAS, v);
+    pub fn ping_pong(mut self) -> Self {
+        self.cfg().mode = DelayMode::PingPong;
         self
-    }
-
-    pub fn tone(&mut self, v: impl IntoVal<f32>) -> &mut Self {
-        set_param!(self, self.cfg.tone, distortion_slots::PARAM_TONE, v);
-        self
-    }
-
-    pub fn output(&mut self, v: impl IntoVal<f32>) -> &mut Self {
-        set_param!(self, self.cfg.output_gain, distortion_slots::PARAM_OUTPUT, v);
-        self
-    }
-
-    pub fn soft_clip(&mut self) -> &mut Self {
-        self.cfg.mode = DistortionMode::SoftClip;
-        self
-    }
-
-    pub fn hard_clip(&mut self) -> &mut Self {
-        self.cfg.mode = DistortionMode::HardClip;
-        self
-    }
-
-    pub fn tube(&mut self) -> &mut Self {
-        self.cfg.mode = DistortionMode::Tube;
-        self
-    }
-
-    pub fn fuzz(&mut self) -> &mut Self {
-        self.cfg.mode = DistortionMode::Fuzz;
-        self
-    }
-
-    pub fn saturate(&mut self) -> &mut Self {
-        self.cfg.mode = DistortionMode::Saturate;
-        self
-    }
-
-    pub fn enabled(&mut self, on: bool) -> &mut Self {
-        self.enabled = on;
-        self
-    }
-
-    pub(crate) fn finish(self) -> FxResult {
-        FxResult {
-            kind: FxKind::Distortion(self.cfg),
-            enabled: self.enabled,
-            automations: self.automations,
-        }
     }
 }
 
-// ── Reverb ──
-
-pub struct ReverbBuilder {
-    cfg: ReverbCfg,
-    enabled: bool,
-    automations: Vec<(u8, AutomationFn)>,
+/// Distortion waveshaping modes, generated for both builder flavours.
+macro_rules! distortion_modes {
+    ($ty:ident) => {
+        impl $ty<'_> {
+            pub fn soft_clip(self) -> Self {
+                self.set_mode(DistortionMode::SoftClip)
+            }
+            pub fn hard_clip(self) -> Self {
+                self.set_mode(DistortionMode::HardClip)
+            }
+            pub fn tube(self) -> Self {
+                self.set_mode(DistortionMode::Tube)
+            }
+            pub fn fuzz(self) -> Self {
+                self.set_mode(DistortionMode::Fuzz)
+            }
+            pub fn saturate(self) -> Self {
+                self.set_mode(DistortionMode::Saturate)
+            }
+        }
+    };
 }
 
-impl ReverbBuilder {
-    pub(crate) fn new() -> Self {
-        Self {
-            cfg: ReverbCfg::default(),
-            enabled: true,
-            automations: Vec::new(),
+impl DistortionBuilder<'_> {
+    fn set_mode(self, mode: DistortionMode) -> Self {
+        if let FxKind::Distortion(c) = self.track.fx_kind_mut(self.idx) {
+            c.mode = mode;
         }
-    }
-
-    pub fn size(&mut self, v: impl IntoVal<f32>) -> &mut Self {
-        set_param!(self, self.cfg.size, reverb_slots::PARAM_SIZE, v);
         self
     }
+}
 
-    pub fn damp(&mut self, v: impl IntoVal<f32>) -> &mut Self {
-        set_param!(self, self.cfg.damp, reverb_slots::PARAM_DAMP, v);
+impl GroupDistortionBuilder<'_> {
+    fn set_mode(mut self, mode: DistortionMode) -> Self {
+        self.cfg().mode = mode;
         self
     }
+}
 
-    pub fn mix(&mut self, v: impl IntoVal<f32>) -> &mut Self {
-        set_param!(self, self.cfg.mix, reverb_slots::PARAM_MIX, v);
-        self
+distortion_modes!(DistortionBuilder);
+distortion_modes!(GroupDistortionBuilder);
+
+// ── Constructors: pushed onto the track / group and handed a builder ──
+
+impl SceneTrack {
+    pub fn delay(&mut self) -> DelayBuilder<'_> {
+        let idx = self.push_fx_default(FxKind::Delay(DelayCfg::default()));
+        DelayBuilder { track: self, idx }
     }
-
-    pub fn width(&mut self, v: impl IntoVal<f32>) -> &mut Self {
-        set_param!(self, self.cfg.width, reverb_slots::PARAM_WIDTH, v);
-        self
+    pub fn chorus(&mut self) -> ChorusBuilder<'_> {
+        let idx = self.push_fx_default(FxKind::Chorus(ChorusCfg::default()));
+        ChorusBuilder { track: self, idx }
     }
-
-    pub fn enabled(&mut self, on: bool) -> &mut Self {
-        self.enabled = on;
-        self
+    pub fn distortion(&mut self) -> DistortionBuilder<'_> {
+        let idx = self.push_fx_default(FxKind::Distortion(DistortionCfg::default()));
+        DistortionBuilder { track: self, idx }
     }
+    pub fn reverb(&mut self) -> ReverbBuilder<'_> {
+        let idx = self.push_fx_default(FxKind::Reverb(ReverbCfg::default()));
+        ReverbBuilder { track: self, idx }
+    }
+}
 
-    pub(crate) fn finish(self) -> FxResult {
-        FxResult {
-            kind: FxKind::Reverb(self.cfg),
-            enabled: self.enabled,
-            automations: self.automations,
-        }
+impl GroupBuilder {
+    pub fn delay(&mut self) -> GroupDelayBuilder<'_> {
+        let idx = self.push_fx_default(FxKind::Delay(DelayCfg::default()));
+        GroupDelayBuilder { fx: self.fx_mut(), idx }
+    }
+    pub fn chorus(&mut self) -> GroupChorusBuilder<'_> {
+        let idx = self.push_fx_default(FxKind::Chorus(ChorusCfg::default()));
+        GroupChorusBuilder { fx: self.fx_mut(), idx }
+    }
+    pub fn distortion(&mut self) -> GroupDistortionBuilder<'_> {
+        let idx = self.push_fx_default(FxKind::Distortion(DistortionCfg::default()));
+        GroupDistortionBuilder { fx: self.fx_mut(), idx }
+    }
+    pub fn reverb(&mut self) -> GroupReverbBuilder<'_> {
+        let idx = self.push_fx_default(FxKind::Reverb(ReverbCfg::default()));
+        GroupReverbBuilder { fx: self.fx_mut(), idx }
     }
 }

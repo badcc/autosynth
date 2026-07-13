@@ -11,4 +11,4 @@ pub mod track;
 pub use fx::{FxKind, FxSpec};
 pub use param::{Automation, AutomationFn, IntoVal, ParamId, PatternFn, Val};
 pub use patch::PatchSpec;
-pub use track::{SourceSpec, TrackSpec};
+pub use track::{SourceSpec, Swing, TrackSpec};

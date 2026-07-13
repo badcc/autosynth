@@ -1,3 +1,4 @@
+use crate::music::shape::Shape;
 use crate::music::{Clock, Phrase};
 
 /// A stable, track-scoped handle to one automatable parameter.
@@ -61,5 +62,13 @@ impl IntoVal<f32> for f32 {
 impl<F: FnMut(Clock) -> f32 + Send + 'static> IntoVal<f32> for F {
     fn into_val(self) -> Val<f32> {
         Val::Fn(Box::new(self))
+    }
+}
+
+// A `Shape` is pure data; it records as an automation by wrapping its `eval` in
+// a closure. No overlap with the `f32` or `FnMut` impls — `Shape` is neither.
+impl IntoVal<f32> for Shape {
+    fn into_val(self) -> Val<f32> {
+        Val::Fn(Box::new(move |c| self.eval(c)))
     }
 }

@@ -4,7 +4,8 @@
 use autosynth::engine::command::{BuiltSource, Command, Playback, TrackBuild};
 use autosynth::engine::Engine;
 use autosynth::model::PatchSpec;
-use autosynth::music::NoteSpec;
+use autosynth::model::track::Swing;
+use autosynth::music::{NoteSpec, Phrase};
 
 fn synth_build(notes: Vec<NoteSpec>) -> TrackBuild {
     TrackBuild {
@@ -17,7 +18,8 @@ fn synth_build(notes: Vec<NoteSpec>) -> TrackBuild {
         fx: Vec::new(),
         fx_enabled: Vec::new(),
         automations: Vec::new(),
-        playback: Playback::OneShot(notes),
+        playback: Playback::OneShot { notes, swing: None },
+        seed: 0,
     }
 }
 
@@ -76,6 +78,48 @@ fn tempo_change_moves_future_notes_without_teleporting() {
     assert!(
         (16_400..=16_700).contains(&onset),
         "onset at sample {onset}, expected ~16537 after tempo doubling"
+    );
+}
+
+#[test]
+fn swing_delays_notes_on_odd_grid_positions() {
+    // A note on beat 0.25 (an odd 16th) with grid=0.25, amount=0.75 shifts late
+    // by (0.75 - 0.5) * 2 * 0.25 = 0.125 beats → it lands on beat 0.375.
+    // At 120 BPM that is 0.375 * 0.5 s = 0.1875 s = 8268 samples.
+    let sr = 44_100.0;
+    let (mut engine, handle) = Engine::new(sr, 1, 120.0);
+    let build = TrackBuild {
+        source: BuiltSource::Synth,
+        patch: PatchSpec::default(),
+        polyphony: 4,
+        gain: 1.0,
+        pan: 0.0,
+        mute: false,
+        fx: Vec::new(),
+        fx_enabled: Vec::new(),
+        automations: Vec::new(),
+        playback: Playback::Pattern {
+            func: Box::new(|p: &mut Phrase| {
+                p.at(0.25);
+                p.note(69, 0.25);
+            }),
+            loop_len: 4.0,
+            swing: Some(Swing { grid: 0.25, amount: 0.75 }),
+        },
+        seed: 0,
+    };
+    handle.send(Command::AddTrack {
+        name: "t".into(),
+        build: Box::new(build),
+    });
+
+    let mut buf = vec![0.0f32; 44_100];
+    engine.render(&mut buf);
+
+    let onset = first_audible(&buf).expect("swung note should sound");
+    assert!(
+        (8_150..=8_450).contains(&onset),
+        "onset at sample {onset}, expected ~8268 after swing"
     );
 }
 

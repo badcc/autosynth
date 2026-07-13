@@ -8,8 +8,8 @@ fn bass(t: &mut Track) {
     t.cutoff(600.0);
     t.gain(0.7);
     t.every(2.0, |p| {
-        p.note(0.0, E2, 0.9, 1.0);
-        p.note(1.0, E2 + 7, 0.8, 1.0);
+        p.note(E2, 1.0).vel(0.9);
+        p.note(E2 + 7, 1.0).vel(0.8);
     });
 }
 
@@ -27,7 +27,7 @@ fn kick(t: &mut Track) {
     t.sustain(0.0);
     t.cutoff(|c: Clock| 400.0 + 300.0 * c.sin(4.0));
     t.every(1.0, |p| {
-        p.note(0.0, E1, 1.0, 0.2);
+        p.note(E1, 0.2).vel(1.0);
     });
 }
 
@@ -38,7 +38,7 @@ fn hat(t: &mut Track) {
     t.decay(0.05);
     t.sustain(0.0);
     t.every(1.0, |p| {
-        p.note(0.5, A5, 0.6, 0.1);
+        p.note(A5, 0.1).at(0.5).vel(0.6);
     });
 }
 
@@ -49,10 +49,26 @@ fn grouped_scene(s: &mut Scene) {
         g.track(kick);
         g.track(hat);
         g.gain(0.9);
-        g.reverb(|r| {
-            r.size(0.4).mix(0.25);
-        });
+        g.reverb().size(0.4).mix(0.25);
     });
+}
+
+// Seeded pattern randomness must produce byte-identical renders (DESIGN §10).
+fn random_bass(t: &mut Track) {
+    t.osc(Waveform::Saw, 0.8);
+    t.cutoff(700.0);
+    t.gain(0.6);
+    t.every(2.0, |p| {
+        for _ in 0..4 {
+            let note = p.pick(&[E2, E2 + 3, E2 + 7, E2 + 10]);
+            let vel = p.rand(0.6..0.9);
+            p.note(note, 0.4).vel(vel);
+        }
+    });
+}
+
+fn random_scene(s: &mut Scene) {
+    s.track(random_bass);
 }
 
 #[test]
@@ -67,6 +83,22 @@ fn group_bus_with_reverb_renders() {
         .fold(0.0f32, f32::max);
     assert!(peak > 0.01, "grouped scene should produce audio (peak {peak})");
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn seeded_randomness_renders_are_byte_identical() {
+    let dir = std::env::temp_dir();
+    let a = dir.join("autosynth_test_rand_a.wav");
+    let b = dir.join("autosynth_test_rand_b.wav");
+    autosynth::render(120.0, random_scene, 4.0, &a).expect("render a");
+    autosynth::render(120.0, random_scene, 4.0, &b).expect("render b");
+
+    let ba = std::fs::read(&a).expect("read a");
+    let bb = std::fs::read(&b).expect("read b");
+    assert_eq!(ba, bb, "seeded renders must be byte-identical");
+
+    let _ = std::fs::remove_file(&a);
+    let _ = std::fs::remove_file(&b);
 }
 
 #[test]
