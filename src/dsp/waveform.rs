@@ -4,4 +4,6 @@ pub enum Waveform {
     Saw,
     Square,
     Triangle,
+    /// White noise. Pitch-independent; useful for percussion and texture.
+    Noise,
 }

@@ -1,56 +1,18 @@
-use anyhow::{Context, Result};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+//! The scene runtime: the builder surface, hot-reload diffing, sample cache,
+//! offline render, cpal setup, and MIDI. This is the only layer the user's
+//! `scene` and track functions touch.
 
-use crate::engine::Engine;
-use crate::scene::Scene;
-use crate::score::Tempo;
+pub mod fx_builder;
+pub mod render;
+pub mod scene;
 
-/// Live-coding entry point with subsecond hot-reload.
-///
-/// Sets up audio output and evaluates the scene function in a loop.
-/// Scene is stateful — per-track HotFn pointer comparison skips
-/// unchanged tracks between patches.
-pub fn live(bpm: f32, scene_fn: fn(&mut Scene)) -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "autosynth=debug".parse().unwrap()),
-        )
-        .init();
+#[cfg(feature = "hot-reload")]
+mod app;
+#[cfg(feature = "midi")]
+pub(crate) mod midi;
 
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .context("No audio output device available")?;
-    let supported = device.default_output_config()?;
-    let sample_rate = supported.sample_rate().0 as f32;
-    let channels = supported.channels() as usize;
+pub use render::render;
+pub use scene::{GroupBuilder, OscBuilder, Scene, SceneTrack};
 
-    let (engine, handle) = Engine::new(sample_rate, channels, Tempo::new(bpm));
-    let stream = engine
-        .build_stream(&device, &supported.into())
-        .context("Failed to build audio stream")?;
-    stream.play()?;
-
-    // Connect to dx serve for hot-patching (subsecond needs this for ASLR reference)
-    dioxus_devtools::connect_subsecond();
-
-    let _midi = crate::midi::connect(handle.clone());
-    if _midi.is_some() {
-        println!("MIDI input connected");
-    } else {
-        println!("No MIDI input device found");
-    }
-
-    println!("autosynth live @ {bpm} BPM — Ctrl+C to stop");
-
-    let mut scene = Scene::new(bpm, sample_rate, handle);
-
-    loop {
-        subsecond::call(|| {
-            scene_fn(&mut scene);
-            scene.finish_frame();
-        });
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-}
+#[cfg(feature = "hot-reload")]
+pub use app::live;

@@ -1,10 +1,8 @@
-use crate::effects::{Effect, StereoFrame};
-
-pub const PARAM_DRIVE: u8 = 0;
-pub const PARAM_MIX: u8 = 1;
-pub const PARAM_BIAS: u8 = 2;
-pub const PARAM_TONE: u8 = 3;
-pub const PARAM_OUTPUT: u8 = 4;
+use crate::dsp::StereoFrame;
+use crate::dsp::effects::Effect;
+use crate::model::fx::distortion_slots::{
+    PARAM_BIAS, PARAM_DRIVE, PARAM_MIX, PARAM_OUTPUT, PARAM_TONE,
+};
 
 /// Waveshaping algorithm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

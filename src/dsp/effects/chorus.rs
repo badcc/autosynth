@@ -1,10 +1,8 @@
 use std::f32::consts::PI;
 
-use crate::effects::{Effect, StereoFrame};
-
-pub const PARAM_RATE: u8 = 0;
-pub const PARAM_DEPTH: u8 = 1;
-pub const PARAM_MIX: u8 = 2;
+use crate::dsp::StereoFrame;
+use crate::dsp::effects::Effect;
+use crate::model::fx::chorus_slots::{PARAM_DEPTH, PARAM_MIX, PARAM_RATE};
 
 /// Modulated delay chorus effect.
 pub struct Chorus {

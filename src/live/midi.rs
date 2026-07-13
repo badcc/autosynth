@@ -2,6 +2,10 @@ use midir::{MidiInput, MidiInputConnection};
 
 use crate::engine::EngineHandle;
 
+/// Connect to the first available MIDI input port and forward note on/off to the
+/// engine. Notes route to whichever track `s.midi(..)` armed. Called by the live
+/// app loop; unused when the `hot-reload` app entry point is compiled out.
+#[cfg_attr(not(feature = "hot-reload"), allow(dead_code))]
 pub(crate) fn connect(handle: EngineHandle) -> Option<MidiInputConnection<()>> {
     let midi_in = MidiInput::new("autosynth").ok()?;
     let ports = midi_in.ports();

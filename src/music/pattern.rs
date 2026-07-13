@@ -1,3 +1,6 @@
+//! `Pattern`: a reusable, transposable bag of timed notes, plus the
+//! `arp` / `euclidean` generators. Pure data and pure functions.
+
 #[derive(Clone, Debug)]
 pub struct PatternNote {
     pub beat: f32,
@@ -93,6 +96,7 @@ impl Pattern {
     }
 }
 
+/// Arpeggio: play `notes` in sequence, one every `step` beats.
 pub fn arp(notes: &[u8], step: f32, dur: f32, vel: f32) -> Pattern {
     let mut pattern = Pattern::new();
     for (i, &note) in notes.iter().enumerate() {
@@ -101,10 +105,7 @@ pub fn arp(notes: &[u8], step: f32, dur: f32, vel: f32) -> Pattern {
     pattern
 }
 
-pub fn seq(notes: &[u8], step: f32, dur: f32, vel: f32) -> Pattern {
-    arp(notes, step, dur, vel)
-}
-
+/// Euclidean rhythm: `hits` evenly spread across `steps` slots of `step_dur`.
 pub fn euclidean(hits: usize, steps: usize, note: u8, vel: f32, step_dur: f32) -> Pattern {
     if steps == 0 || hits == 0 {
         return Pattern::new();
@@ -133,7 +134,7 @@ fn compute_euclidean(hits: usize, steps: usize) -> Vec<bool> {
     let mut remainders = vec![1usize; steps - hits];
 
     loop {
-        if remainders.is_empty() || remainders.len() <= 1 {
+        if remainders.len() <= 1 {
             break;
         }
 

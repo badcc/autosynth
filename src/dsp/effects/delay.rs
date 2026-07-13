@@ -1,7 +1,6 @@
-use crate::effects::{Effect, StereoFrame};
-
-pub const PARAM_FEEDBACK: u8 = 0;
-pub const PARAM_MIX: u8 = 1;
+use crate::dsp::StereoFrame;
+use crate::dsp::effects::Effect;
+use crate::model::fx::delay_slots::{PARAM_FEEDBACK, PARAM_MIX};
 
 /// Delay feedback routing mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

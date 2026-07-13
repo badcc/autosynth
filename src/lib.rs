@@ -1,31 +1,20 @@
-pub mod automation;
-pub mod duration;
-pub mod effect_config;
-pub mod effects;
+//! autosynth — a Rust live-coding synthesizer where plain functions *are* the
+//! music. Five strictly-ordered layers, each depending only on those above it:
+//!
+//! - [`music`]  pure vocabulary: notes, harmony, durations, `Phrase`, `Clock`
+//! - [`model`]  declarative, diffable scene description
+//! - [`dsp`]    pure per-block processors: oscillators, ADSR, SVF, effects
+//! - [`engine`] real-time: transport, scheduler, voice banks, mixer, commands
+//! - [`live`]   scene runtime: hot-reload diffing, sample cache, MIDI, cpal
+
+pub mod dsp;
 pub mod engine;
-pub mod event;
-pub mod filter;
-pub mod harmony;
-#[cfg(feature = "live")]
 pub mod live;
-pub mod notes;
-pub mod oscillator;
-pub mod patch;
-pub mod pattern;
+pub mod model;
+pub mod music;
 pub mod prelude;
 pub mod sample;
-pub mod sampler;
-#[cfg(feature = "live")]
-pub(crate) mod midi;
-#[cfg(feature = "live")]
-pub mod scene;
-pub mod score;
-pub mod session;
-pub mod synth;
-pub mod track;
-pub mod waveform;
 
-pub(crate) mod envelope;
-
-#[cfg(feature = "live")]
+pub use live::render;
+#[cfg(feature = "hot-reload")]
 pub use live::live;

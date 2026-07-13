@@ -4,8 +4,23 @@ version = "0.2.0"
 edition = "2024"
 
 [features]
-default = ["live"]
-live = ["dep:subsecond", "dep:dioxus-devtools", "dep:midir"]
+default = ["hot-reload", "midi"]
+# Subsecond hot-patching + dioxus devtools connection.
+hot-reload = ["dep:subsecond", "dep:dioxus-devtools"]
+# MIDI input via midir.
+midi = ["dep:midir"]
+
+[[example]]
+name = "simple"
+required-features = ["hot-reload"]
+
+[[example]]
+name = "maya"
+required-features = ["hot-reload"]
+
+[[example]]
+name = "into_jfk"
+required-features = ["hot-reload"]
 
 [dependencies]
 anyhow = "1.0"

@@ -8,27 +8,17 @@ pub enum FilterType {
     Notch,
 }
 
-/// Per-voice state-variable filter (Cytomic/Andrew Simper SVF).
-///
-/// Linear, numerically stable, and supports modulation-friendly cutoff changes.
-#[derive(Clone, Copy, Debug)]
+/// Per-voice state-variable filter (Cytomic / Andrew Simper SVF).
+/// Linear, numerically stable, and modulation-friendly.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Svf {
     ic1eq: f32,
     ic2eq: f32,
 }
 
-impl Default for Svf {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Svf {
     pub fn new() -> Self {
-        Self {
-            ic1eq: 0.0,
-            ic2eq: 0.0,
-        }
+        Self::default()
     }
 
     pub fn reset(&mut self) {
@@ -36,12 +26,7 @@ impl Svf {
         self.ic2eq = 0.0;
     }
 
-    /// Process a single sample through the SVF.
-    ///
-    /// `cutoff`: filter frequency in Hz (clamped to Nyquist)
-    /// `resonance`: 0.0 (no resonance) to 1.0 (self-oscillation)
-    /// `filter_type`: which output to return
-    /// `sample_rate`: audio sample rate in Hz
+    /// Process one sample. `resonance` is `0.0..1.0` (higher = more resonant).
     pub fn process(
         &mut self,
         sample: f32,
@@ -50,10 +35,7 @@ impl Svf {
         filter_type: FilterType,
         sample_rate: f32,
     ) -> f32 {
-        // Clamp cutoff to avoid instability near Nyquist
         let cutoff = cutoff.clamp(20.0, sample_rate * 0.49);
-        // Map resonance 0..1 to Q: Q = 0.5 (high res) to ~infinity (no res)
-        // k = 1/Q, so k ranges from 2 (no resonance) to ~0 (self-oscillation)
         let k = 2.0 - 2.0 * resonance.clamp(0.0, 0.99);
 
         let g = (PI * cutoff / sample_rate).tan();
