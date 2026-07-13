@@ -1,323 +1,430 @@
-# autosynth — Design Doc
+# autosynth — Architecture
 
-**Goal.** A Rust live-coding synthesizer where plain, elegant Rust functions *are* the music.
-Edit a function, save, and the sound updates — sound changes immediately, timing changes at
-the next loop boundary. The API should feel inevitable: no ceremony, no engine plumbing
-visible from user code.
+autosynth is a Rust live-coding synthesizer where plain functions *are* the music. You
+write a `fn bass(t: &mut Track)`, register it with `s.track(bass)`, and edit it while it
+plays: sound changes (a filter cutoff, an effect mix) apply immediately; timing changes (a
+new pattern, a different loop length) land at the next loop boundary, on the grid. No
+registration, no string keys, no engine plumbing visible from user code.
 
-This document reviews the current implementation (~5k lines), identifies what to keep, cut,
-and rewrite, and lays out the target architecture.
-
----
-
-## 1. What the current code gets right
-
-These are the load-bearing ideas. They survive the redesign untouched or strengthened:
-
-- **The function is the track.** `s.track(bass)` uses the function's `TypeId` as identity and
-  its name as the display name (`scene.rs`). No registration, no string keys in user code.
-  This is the signature move of the whole library — keep it.
-- **`IntoVal` parameter polymorphism.** `t.cutoff(800.0)` and
-  `t.cutoff(|c: Clock| 1000.0 + 300.0 * (c.beat * 0.1).sin())` through one method
-  (`automation.rs`). Static value or clock-driven automation, decided by the type system.
-  This *is* the automation API. Keep.
-- **`every(beats, |p| …)` regenerating phrases.** The closure re-runs at each loop boundary,
-  so `rand::` calls naturally re-roll per iteration, and `p.iteration` enables evolving
-  patterns. Elegant, and exactly right for live coding. Keep.
-- **Two-speed hot reload semantics.** Sound changes (patch, fx params, automations) apply
-  immediately; timing changes (pattern, loop length) queue to the loop boundary
-  (`engine.rs` `UpdateTrack`, `track.rs` `PendingTimingUpdate`). Musically correct. Keep the
-  semantics; simplify the mechanism (§4.5).
-- **Structural diffing to preserve DSP state.** Unchanged effects keep their delay buffers
-  across reloads (`TrackSnapshot` in `scene.rs`). Right instinct; the implementation has
-  holes (§2) but the principle stays.
-- **Headless-capable engine.** `Engine::render(&mut [f32])` is already separable from cpal.
-  This makes offline rendering and golden-file testing nearly free (§6, §7).
-- **The music vocabulary.** `notes.rs`, `harmony.rs`, `duration.rs`, `pattern.rs` are pure
-  data and pure functions. Cheap, useful, correct. Keep (minus aliases, §3).
-
-## 2. Defects found (evidence for the rewrite)
-
-Concrete bugs and structural flaws in the current code. Each is a symptom of an
-architectural gap, cited where it matters for §4.
-
-1. **Tempo changes break running music.** Loop lengths and event times are converted to
-   *samples at launch time* using the tempo of that moment (`track.rs:227-231`,
-   `score.rs:144-152`). `SetTempo` updates the session but no running player, and
-   `ClipGenerator` captures its own stale `Tempo` copy. Worse, the global beat is recomputed
-   from sample 0 with the *current* bpm (`track.rs:363`), so a tempo change teleports every
-   clock. → transport rewrite (§4.1).
-2. **NoteOffs past the loop end are silently dropped.** The player resets its index at the
-   wrap, discarding any event scheduled beyond the boundary; `all_notes_off()` at every wrap
-   (`track.rs:324`) papers over it by choking releases. → scheduler rewrite (§4.1).
-3. **Automation runs at 16th-note granularity** (`track.rs:362-365`), so a cutoff sweep is a
-   4-steps-per-beat staircase. → control-rate evaluation + smoothing (§4.2).
-4. **`.enabled(false)` toggle is lost on hot reload.** The enabled flag lives outside
-   `EffectConfig`, so the snapshot diff can't see it; when configs are equal, `send_update`
-   omits `fx_enabled` entirely (`scene.rs:368-374`). → unified param model (§4.4).
-5. **`polyphony()` changes are silently ignored on reload.** `send_update` discards the
-   field (`scene.rs:352`) and `UpdateTrack` can't carry it.
-6. **Track name collisions.** `short_name` keeps only the last path segment (`scene.rs:34`),
-   so `a::bass` and `b::bass` map to the same engine track and fight over it.
-7. **Per-sample everything.** The render loop iterates a `HashMap` of tracks per *sample*
-   (`session.rs:106-115`); each track does event-dispatch checks, f64 beat math, and virtual
-   fx calls per sample. → block-based rendering (§4.2).
-8. **Audio-thread allocation.** Commands carry `String`/`Vec`/`Box` that are freed on the
-   audio thread; `ClipGenerator::regenerate` runs user closures and allocates + sorts on the
-   audio thread at every loop boundary. Workable, but unacknowledged. → RT rules (§4.6).
-9. **Synth/Sampler are 80% copy-paste.** Voice allocation, stealing, ADSR propagation, LFO,
-   filter, param clamping — duplicated across `synth.rs` and `sampler.rs`, then manually
-   unified by an 11-method delegation enum (`track.rs:20-102`). → generic voice engine (§4.3).
-10. **Patch state is smeared across voices.** ADSR fields are hand-copied into every voice in
-    six places. A voice should *read* shared params, not own stale copies.
-11. **Three parallel types per effect.** `Delay` / `DelayConfig` / `DelayBuilder`, times
-    three effects — `effect_config.rs` is 411 lines of triplicated boilerplate wired by `u8`
-    param slots. Adding one effect touches five files. → declarative params (§4.4).
-12. **Dead and vestigial code.** `Track.gain` is never settable; `EventKind::Param` /
-    `SetPatch` are never produced; `Score` exists only to wrap a `Vec` on its way to the
-    engine; `Time::Seconds` is unused by the real API; `sound()/play()/fx()` delegators are
-    identity calls; `Session::launch` auto-creates a default track that masks bugs.
-13. **Naive oscillators alias badly.** Raw saw/square (`oscillator.rs:99-108`) produce
-    audible aliasing in exactly the register leads live in. → polyBLEP (§4.3).
-14. **Hard clipping as a mixing strategy.** Every synth clamps its own output and the session
-    clamps the sum per sample. Loud mixes distort harshly by design. → mixer with soft
-    limiter (§4.5).
-15. **LFO is hardwired to cutoff only** (`synth.rs:223-226`). A "depth" knob that can only
-    ever wobble the filter is a dead end. Fold pitch/amp targets into the automation system
-    instead of growing a mod-matrix.
-
-## 3. Cut list
-
-Delete without replacement — each is indirection or duplication that fights the design:
-
-| Cut | Why |
-|---|---|
-| `Score`, `Sequence` as public concepts | `Phrase` is the one note container; the engine consumes a plain sorted event list. |
-| `Time::Seconds` (and the `Time` enum) | Everything is beats. `f32` beats everywhere; `b()` wrapper goes away too. |
-| `EventKind::Param`, `EventKind::SetPatch` | Never constructed. Events are `NoteOn`/`NoteOff`. |
-| `EngineHandle` as public API | Scene is *the* API. The handle's 18 mirror-methods become an internal command sender. |
-| `Patch` builder methods (`patch.rs:52-115`) | `Patch` is plain data; `SceneTrack` is the only builder. |
-| `Session::launch` auto-track-creation | Launch on a missing track is a bug, not a feature. |
-| `Track.gain` field | Dead. Replaced by real mixer gain (§4.5). |
-| `sound()` / `play()` / `fx()` delegators | Identity functions that promise granular reload they don't deliver. |
-| Alias functions: `dot`, `tri`, `seq`, `double_dotted`, `bars_of` | One name per concept. |
-| `add_track` / `add_track_with_polyphony` / `add_sampler_track` / `add_kit_track` (+ their four `Command` variants) | One `TrackSpec` struct, one `Command::AddTrack`. |
-| Per-effect `PARAM_*: u8` slot constants | Subsumed by the param system (§4.4). |
-
-The `live` feature flag splits into `hot-reload` (subsecond + dioxus-devtools) and `midi`
-(midir) — they are unrelated capabilities.
-
-## 4. Target architecture
-
-Five layers, strictly ordered; each depends only on the layers above it in this list:
-
-```
-music/    pure vocabulary: notes, harmony, durations, Phrase & combinators
-model/    declarative, diffable scene description: TrackSpec, PatchSpec, FxSpec, params
-dsp/      pure per-block processors: oscillators, ADSR, SVF, effects (no track knowledge)
-engine/   real-time: Transport, Scheduler, VoiceBank, Mixer, command loop
-live/     Scene runtime: hot-reload diffing, sample cache, MIDI, cpal setup
-```
-
-The data flow is one-directional: user functions build `model` values → `live` diffs them
-against the previous frame → diffs become commands → `engine` applies them at musically
-correct times → `dsp` makes the samples. The user only ever touches `music` and the builder
-surface of `live`.
-
-### 4.1 Beat-native transport (rewrite)
-
-The root cause of defect group 1–2 is that time is converted to samples too early. Invert it:
-
-- The engine owns a `Transport { beat: f64, bpm: f64 }`. Each block advances
-  `beat += frames * bpm / (60 * sample_rate)`. Tempo changes take effect at the next block —
-  every downstream consumer is automatically correct, including mid-flight loops.
-- All scheduling is in beats: events are `(beat: f64, NoteOn/NoteOff)`, loops are
-  `loop_len: f64` beats, boundaries are fractional-beat positions resolved to sample offsets
-  *within the current block*.
-- The per-track scheduler is a sorted event list with a cursor, but note-offs are tracked as
-  *obligations*: a NoteOn schedules its own off, and offs survive loop wraps instead of being
-  dropped. `all_notes_off` at the boundary remains only as the intentional behavior for
-  *replaced* patterns, not a leak-plugging default.
-- `Clock { beat, local, iteration }` is computed from the transport, not reverse-engineered
-  from sample counts.
-
-### 4.2 Block-based rendering with control-rate automation (rewrite)
-
-Replace the per-sample outer loop (`session.rs:102-136`) with:
-
-- `render(block)` per track: split the block at event beats (sample-accurate), render
-  sub-slices. Within a sub-slice nothing changes, so the voice loop is tight and
-  vectorizable.
-- Automation closures evaluate once per control period (64 samples, not 16th notes), writing
-  *targets*; audible params (gain, cutoff) glide to targets over the control period
-  (one-pole or linear dezipper). This fixes stair-stepping and clicks in one mechanism.
-- Tracks render into a scratch stereo buffer; the mixer sums buffers. HashMap iteration
-  happens once per block, not once per sample.
-
-### 4.3 One voice engine, generic over the sound source (rewrite)
-
-Collapse `Synth` + `Sampler` + `SoundSource` into:
+This document explains how that works: how a function becomes a track, what actually
+happens when you hit save, how time is represented so tempo changes don't derail running
+loops, what runs on the audio thread, and the DSP underneath. It's written for a technical
+user who knows some Rust — the goal is that nothing the instrument does surprises you.
 
 ```rust
-trait Source: Send {                    // the only thing that differs per instrument
-    fn trigger(&mut self, note: u8);
-    fn render(&mut self, out: &mut [f32]);   // pre-env, pre-filter
-    fn finished(&self) -> bool;              // sampler: buffer exhausted
+fn main() -> Result<()> {
+    autosynth::live(120.0, scene)
 }
 
-struct Voice<S: Source> { source: S, env: Adsr, filter: Svf, note: u8, vel: f32, … }
-struct VoiceBank<S: Source> { voices: Vec<Voice<S>>, patch: Arc-or-shared Patch, … }
-```
-
-`OscBank` (the synth source) and `SamplePlayhead` / `KitPlayhead` implement `Source`.
-Voice allocation, stealing, retrigger modes, envelope, filter, and param handling exist
-*once*. The track holds `VoiceBank<OscBank>` or `VoiceBank<SamplePlayhead>` behind one small
-enum — the enum delegates 3 methods, not 11, because everything shared lives in `VoiceBank`.
-
-While rewriting: oscillators get polyBLEP band-limiting (saw/square; ~15 lines), and a
-`Noise` waveform is added — both trivial once the render is block-based.
-
-### 4.4 A single parameter system (rewrite; deletes `effect_config.rs`)
-
-Everything automatable is a `Param`: a typed id + range + smoothing policy. Tracks expose a
-flat param table (synth params, per-osc params, per-effect params, fx-enabled, mixer
-gain/pan). Consequences:
-
-- An automation is `(ParamId, Box<FnMut(Clock) -> f32>)` — one representation for what is
-  currently seven `AutoCmd` variants plus per-effect slot plumbing.
-- Effects declare their params once, declaratively (a small `params!` macro or a
-  `Params` trait with an array of descriptors). The config-for-diffing and the
-  builder-with-`IntoVal` are *derived* from that single declaration. Adding an effect means
-  writing its DSP and its param list — nothing else.
-- Fx-enabled becomes a param like any other, which fixes defect 4 structurally: it's in the
-  diffable model, so a static toggle is a visible change.
-- Param ids are stable handles (track-scoped), not positional `fx_index`/`u8` slots, so
-  reordering effects can't cross wires.
-
-### 4.5 Declarative model + simpler diffing (simplify)
-
-`SceneTrack` (the builder) produces a `TrackSpec`:
-
-```rust
-struct TrackSpec {
-    source: SourceSpec,          // Synth(PatchSpec) | Sample{path, root} | Kit{slots}
-    params: ParamValues,         // every static param value, diffable
-    fx: Vec<FxSpec>,             // kind + param values, diffable
-    polyphony: usize,
-    loop_len: Option<f64>,
-    pattern: Option<PatternFn>,  // closures: compared by HotFn ptr only
-    automations: Vec<(ParamId, AutomationFn)>,
-}
-```
-
-The Scene keeps `prev: HashMap<TrackId, TrackSpec>` and diffs whole specs. The rules stay
-what they are today — new/removed tracks tear up/down; source changes rebuild; param/fx
-changes apply now; pattern/loop changes queue to the boundary — but they fall out of *one*
-diff over *one* complete description, instead of ptr-tracking + partial snapshots + special
-cases. Because the spec is complete (params, enabled flags, polyphony all in it), defects
-4–5 can't recur. Track names use the full module path with a short display name, fixing
-defect 6.
-
-The mixer joins the model here: per-track `gain` / `pan` / `mute` become spec fields (and
-params, so they're automatable), tracks sum on a master bus with a soft-clip limiter — the
-per-synth and per-session hard clamps are deleted.
-
-### 4.6 Real-time discipline (harden)
-
-Rules the engine crate enforces by construction:
-
-- Commands travel over a bounded SPSC ring buffer; anything heap-allocated that the audio
-  thread replaces (old fx boxes, old event lists) is sent *back* over a return ring and
-  dropped on the control thread. No `malloc`/`free` in the callback.
-- Pattern regeneration moves off the audio thread: the engine publishes "boundary for track T
-  at beat B is approaching" one control-period early; the Scene thread runs the user closure
-  and ships the event list; the engine swaps it in at the boundary. User code (with its
-  `rand`, allocation, and possible panics) never runs in the callback. A panic in a pattern
-  closure logs and keeps the previous loop playing — live sets don't stop.
-- Voices, event lists, and scratch buffers are preallocated at track creation.
-
-## 5. Necessary features
-
-What "complete" means for this instrument. Roughly ordered; ★ = doesn't exist today.
-
-**Sound**
-- Subtractive synth: N oscillators (polyBLEP ★), detune/level/phase, ADSR, SVF, noise ★.
-- Sampler: pitched one-shot + kit slots (exists, gets the shared voice engine).
-- Effects: delay, chorus, distortion (exist) + **reverb ★** (the most-missed live-coding
-  effect; a Freeverb/Dattorro is fine) + compressor ★ (later).
-- Mixer ★: per-track gain/pan/mute, groups with shared fx (from `TODO.md`), master limiter.
-
-**Time**
-- Beat-native transport ★; tempo changes that just work ★.
-- Quantized launch ★: new/changed tracks start at the next bar, not "wherever the ring buffer
-  was" — this is `TODO.md`'s "queue restarted track" item.
-- Swing/groove ★ (a per-track timing warp applied at schedule time — cheap once beats are
-  native).
-
-**Language** (all pure, all in `music/`)
-- Existing: note constants, `note("C#4")`, scales/chords/degrees, `euclidean`, `arp`,
-  `steps` mini-notation, phrase combinators (`then`, `layer`, `repeat`, `transpose`).
-- `Clock` shape helpers ★: `c.phase(16.0)`, `c.ramp(a, b, len)`, `c.sin(len)` — the
-  automation closures in every example hand-roll these.
-
-**Live**
-- Hot reload with the two-speed semantics (exists; rebuilt on §4.5).
-- MIDI note input routed by `s.midi(track)` (exists); MIDI CC → param mapping ★.
-- Offline render ★: `autosynth::render(scene, bars, "out.wav")` — same engine, no cpal.
-  This is also the testing story (§7).
-
-**Explicitly not features** (for now): arrangement timelines, plugin hosting, GUI
-(`TODO.md`'s ratatui scope-view is a separate binary if it ever happens), mod matrix.
-
-## 6. Target user code
-
-The API barely moves — that's the point. Additions are marked:
-
-```rust
 fn scene(s: &mut Scene) {
-    s.tempo(122.0);
     s.track(bass);
     s.track(drums);
-    s.group("rhythm", &[drums, bass], |g| {     // NEW: group bus
-        g.gain(0.9);
-        g.reverb(|r| r.size(0.3).mix(0.2));     // NEW: reverb, bus fx
-    });
 }
 
 fn bass(t: &mut Track) {
     t.osc(Waveform::Saw, 0.8);
-    t.cutoff(|c: Clock| 400.0 + 300.0 * c.sin(8.0));  // NEW: Clock helpers
-    t.pan(-0.2);                                       // NEW: mixer param
+    t.cutoff(|c: Clock| 400.0 + 300.0 * c.sin(8.0));   // automation: a closure is a knob
     t.every(8.0, |p| {
-        p.note(0.0, E1, 0.9, 2.0);                     // beats are plain f32 — no b()
+        p.note(0.0, E1, 0.9, 2.0);
         p.steps(E1, "x..x..x.", 0.7);
     });
 }
 ```
 
-## 7. Testing strategy
+---
 
-The engine renders into a slice with no audio device — exploit it:
+## 1. The five layers
 
-- **Timing tests**: schedule a phrase, render N blocks, assert note-on sample positions
-  exactly (including across tempo changes and loop wraps — regression tests for defects 1–2).
-- **DSP tests**: golden spectra/RMS for oscillators, filter, envelope, each effect.
-- **Diff tests**: feed two `TrackSpec`s to the differ, assert the exact command sequence
-  (regression tests for defects 4–6).
-- **RT tests**: assert-no-alloc harness around the render callback in debug builds.
+The crate is five modules, strictly ordered — each depends only on the ones above it:
 
-## 8. Migration plan
+```
+music/    pure vocabulary: notes, harmony, durations, Phrase, Clock
+model/    declarative, diffable scene description: TrackSpec, PatchSpec, FxSpec, ParamId
+dsp/      pure processors: oscillators, ADSR, SVF, effects — no track knowledge
+engine/   real-time core: Transport, Scheduler, VoiceBank, Mixer, command loop
+live/     scene runtime: hot-reload diffing, sample cache, MIDI, cpal setup
+```
 
-Each phase compiles, passes tests, and keeps the examples playing:
+Data flows one way. Your track functions build `model` values (a `TrackSpec` per track);
+the `live` layer diffs each spec against the previous frame; differences become commands;
+the `engine` applies them at musically correct times; `dsp` crunches the samples. You only
+ever touch `music` and the builder surface of `live` — everything below is the instrument.
 
-1. **Deletions + model extraction.** Apply the cut list (§3); introduce `TrackSpec` and the
-   param table; rewrite `Scene` diffing on top (§4.4–4.5). Mostly moves & deletions; fixes
-   defects 4–6 and 12.
-2. **Transport.** Beat-native clock and scheduler (§4.1). Fixes defects 1–2. Add timing tests
-   first — they define the contract.
-3. **Voice engine + blocks.** `VoiceBank<S: Source>`, block rendering, control-rate
-   automation with smoothing, polyBLEP (§4.2–4.3). Fixes defects 3, 7, 9, 10, 13.
-4. **Mixer.** Track gain/pan, groups, master limiter, reverb (§4.5). Fixes defect 14.
-5. **RT hardening.** SPSC rings, garbage return, off-thread pattern regen (§4.6). Fixes
-   defect 8.
-6. **Polish.** Quantized launch, swing, Clock helpers, MIDI CC map, offline render.
+Two threads. The **control thread** runs your scene function in a loop, loads samples,
+builds effect boxes, and sends commands. The **audio thread** (the cpal callback) owns the
+engine and renders. They meet at exactly one channel of `Command` values. The engine knows
+nothing about hot-reload or cpal; it renders into any `&mut [f32]`, which is also how
+offline rendering and the test suite work (§9).
+
+Feature flags: `hot-reload` (subsecond + dioxus-devtools) and `midi` (midir) are
+independent capabilities and can be compiled out separately.
+
+## 2. The function is the track
+
+The signature move of the library: `s.track(bass)` needs no name and no registration
+because **the function's type is its identity**. In Rust, every function item has a unique
+zero-sized type, so:
+
+```rust
+pub struct TrackId(TypeId);
+
+pub fn track<F: Fn(&mut SceneTrack) + 'static>(&mut self, f: F) {
+    let id = TrackId::of::<F>();            // TypeId::of::<F>() — the fn type IS the key
+    let key = std::any::type_name::<F>();   // "my_set::bank_a::bass" — the engine key
+    ...
+}
+```
+
+Two facts fall out of this:
+
+- **Identity is stable across edits.** Changing the body of `bass` doesn't change its
+  type, so the engine track persists and hot reloads target it precisely.
+- **Names are free and collision-proof.** `std::any::type_name` gives the full module
+  path, so `bank_a::bass` and `bank_b::bass` are distinct engine tracks; only the last
+  path segment is used for display.
+
+The same trick powers `s.midi(bass)` (route MIDI input to that track) and
+`g.track(bass)` inside group definitions — anywhere the API needs to refer to a track, it
+takes the function itself.
+
+## 3. What happens when you hit save
+
+The `live(bpm, scene)` entry point builds the cpal stream, connects to the
+dioxus-devtools server (which streams binary patches produced by subsecond's hot-patching
+linker), and then runs a 20 Hz loop:
+
+```rust
+loop {
+    subsecond::call(|| {
+        scene_fn(&mut scene);     // your fn scene(s: &mut Scene)
+        scene.finish_frame();
+    });
+    sleep(50ms);
+}
+```
+
+`subsecond::call` dispatches through a jump table, so after a patch it invokes the *newest*
+version of your scene function. Inside, every `s.track(f)` does a cheap check before doing
+any real work:
+
+```rust
+let mut hot = subsecond::HotFn::current(f);
+if self.ptrs.get(&id) == Some(&hot.ptr_address()) {
+    return;   // this function wasn't recompiled — skip it entirely
+}
+```
+
+Each track function's hot-patched code address is memoized. If a save didn't change
+`bass`, its builder never re-runs and nothing is sent. If it did, the builder runs against
+a fresh `SceneTrack`, producing a complete `TrackSpec` — a declarative description of the
+track: source, patch, mixer settings, fx chain, polyphony, loop length, pattern closure,
+automations.
+
+The spec is then **diffed by value** against the previous frame's spec, and only the
+differences become commands:
+
+| Change detected | Action | When it applies |
+|---|---|---|
+| new track function | `AddTrack` | next bar (quantized launch, §5) |
+| function removed from `scene` | `RemoveTrack` | immediately |
+| `source` or `polyphony` changed | remove + re-add (voices rebuilt) | next bar |
+| patch fields (osc/env/filter/LFO) | `SetPatch` | immediately, voices keep playing |
+| gain / pan / mute | `SetMixer` | immediately (gain glides, §8) |
+| fx params changed | `SetFx` (fresh DSP boxes) | immediately |
+| **only** fx `enabled` flags changed | `SetFxEnabled` | immediately, **buffers preserved** |
+| pattern / loop length | `QueuePattern` | next loop boundary |
+
+The `SetFxEnabled` special case is worth noticing: toggling `.enabled(false)` on a delay
+must not rebuild the delay, or you'd lose the echo tail ringing in its buffer. The diff
+checks whether the fx chains are structurally identical (same kinds, same params) and, if
+so, ships only the flag vector. More generally, the engine only rebuilds DSP state when
+the diff proves it has to — unchanged effects keep their buffers, running voices survive
+patch edits, and a source change (a different sample file, synth→sampler) is the only
+thing that tears a track down.
+
+Two things can't be value-compared: pattern closures and automation closures (they're
+`Box<dyn FnMut ...>`). Patterns are handled by the pointer memoization above — the builder
+only re-ran because *something* in the function changed, so the pattern is re-queued to
+the next boundary. Automations are simply resent wholesale on every re-run; replacing a
+`Vec` of boxed closures is cheap and always correct.
+
+`finish_frame()` closes the loop: any track that was in the previous frame but wasn't
+mentioned this frame gets removed (deleting the `s.track(...)` line *is* the delete
+operation), group buses are reconciled as a whole set, and the MIDI routing target is
+updated.
+
+### Two speeds, on purpose
+
+The table above encodes the library's central musical rule: **sound changes are
+immediate, timing changes are quantized.** Tweaking a cutoff mid-phrase should be heard
+*now*; swapping a drum pattern mid-bar would stumble, so it waits for the loop boundary.
+You never opt into this — the kind of change determines the speed.
+
+## 4. Time is beats, all the way down
+
+Everything in the engine is scheduled in **beats** (`f64`), never in samples. The
+transport is the only component that knows the conversion:
+
+```rust
+pub struct Transport { pub beat: f64, pub bpm: f64, pub sample_rate: f64 }
+// each block: beat += frames * bpm / (60.0 * sample_rate)
+```
+
+Sample positions are derived at the last possible moment — "this note-on falls 23 samples
+into the current block" — and never stored. The payoff: a tempo change is one field write.
+Every running loop, every scheduled note-off, every automation clock is automatically
+correct at the new tempo on the next block, because none of them ever cached a
+sample-based time. (The previous generation of this engine converted beats to samples at
+launch time; tempo changes teleported every clock. That entire bug class is gone by
+construction.)
+
+### The scheduler and note-off obligations
+
+Each track owns a `Scheduler`: a sorted list of note-ons in loop-local beats, a cursor,
+and the loop bookkeeping (`iter_base` = global beat where the current iteration started,
+`iteration` counter). Per block, `collect(b0, b1)` emits every event in the beat range
+`[b0, b1)`, wrapping the loop as many times as needed.
+
+Note-offs are not stored in the pattern. When a note-on fires, the scheduler registers an
+**obligation** — `(global_beat_of_release, note)` — in a pending list that is checked
+every block, independent of the loop cursor:
+
+```rust
+out.push(Fired { beat: g, ev: NoteEv::On { note, vel } });
+self.pending_offs.push((g + dur, note));   // survives loop wraps
+```
+
+So a note whose duration spills past the loop end still releases exactly on time, in the
+next iteration. Held notes are only force-choked in one situation: when a *replaced*
+pattern takes over at the boundary (an actual edit), the old pattern's obligations are
+flushed as immediate note-offs so the outgoing loop doesn't ring over the new one. A mere
+loop repeat never chokes anything.
+
+### `every(beats, |p| …)` — regenerating patterns
+
+A pattern is a closure, not data — `FnMut(&mut Phrase)` — and it re-runs for every loop
+iteration. Just before a boundary falls inside the current render block, the track runs
+the closure for the *upcoming* iteration and stages the result; the scheduler swaps it in
+exactly at the boundary. Consequences:
+
+- `rand::` calls inside the closure naturally re-roll each loop.
+- `p.iteration` and `p.beat` (the loop count and the global beat of the iteration's start)
+  let patterns evolve: every 4th loop gets a fill, intensity ramps across iterations.
+- The closure runs inside `catch_unwind`. **A panic in your pattern logs an error and
+  keeps the previous loop playing** — an out-of-bounds index in a scale lookup doesn't
+  stop the set.
+
+A regeneration that changes nothing structural keeps the iteration counter climbing; only
+an actual loop-length change re-anchors the clock and resets the count.
+
+### Quantized launch
+
+Newly added tracks (and source-changed rebuilds) don't start "wherever the ring buffer
+happened to be" — the engine starts them at the next bar (`ceil(beat / 4) * 4`). Adding a
+track mid-set lands on the grid.
+
+### Clock
+
+Automation closures receive a `Clock { beat, local, iteration }` — global beat, position
+within the current loop, and loop count. It's computed fresh from the transport and the
+scheduler's anchors each control period, never reverse-engineered from a sample counter,
+so it stays truthful across tempo changes and pattern swaps. `Clock` also carries the
+shape helpers most automations want: `c.phase(len)` (rising 0→1 ramp over `len` beats),
+`c.ramp(a, b, len)`, `c.sin(len)`, `c.tri(len)`.
+
+## 5. The render path
+
+The engine renders in **control blocks** of 64 frames (~1.5 ms at 44.1 kHz). Each cpal
+callback drains the command channel, then loops over the buffer in ≤64-frame chunks:
+
+```
+per control block, per track:
+  1. evaluate automation closures once (control rate), write param targets
+  2. apply any queued timing swap whose boundary has arrived
+  3. regenerate the upcoming pattern iteration if a boundary falls in this block
+  4. collect note events in [b0, b1) from the scheduler
+  5. render mono, splitting the block at each event's sample offset
+  6. pan to stereo → fx chain → smoothed gain → sum into the bus
+```
+
+Step 5 is the sample-accuracy mechanism: the block is rendered in sub-slices between
+events, with `note_on`/`note_off` applied at the exact sample offset
+(`(event_beat - b0) / beats_per_sample`). Within a sub-slice nothing changes, so the inner
+voice loop is tight. A note lands on the same sample whether the buffer is 64 or 4096
+frames — which is also what makes offline renders bit-identical to live output.
+
+The mix stage: ungrouped tracks sum straight into a master buffer. Grouped tracks sum
+into a shared bus buffer first; the bus applies its own gain and fx chain (this is how
+several tracks share one reverb), then sums into master. Finally the master passes through
+a **soft limiter** — linear below 0.8, then a `tanh` squash toward ±1.0:
+
+```rust
+if |x| <= 0.8 { x } else { sign(x) * (0.8 + 0.2 * tanh((|x| - 0.8) / 0.2)) }
+```
+
+so a loud mix rounds over instead of hard-clipping. There are no other clamps anywhere in
+the signal path — tracks are free to run hot into a bus.
+
+Panning is equal-power (`cos`/`sin` of the pan angle), so a sound keeps constant perceived
+loudness as it moves across the field.
+
+## 6. One voice engine, generic over the sound source
+
+Synth and sampler are the same machine. The only thing that differs between them is how a
+triggered note turns into a raw mono signal, and that difference is one trait:
+
+```rust
+pub trait Source: Send + Sized {
+    type Cfg: Send;                                  // shared config: osc list / sample map
+    fn new(sample_rate: f32, cfg: &Self::Cfg) -> Self;
+    fn trigger(&mut self, note: u8, cfg: &Self::Cfg);
+    fn render(&mut self, cfg: &Self::Cfg, dt: f32) -> f32;   // pre-env, pre-filter
+    fn finished(&self) -> bool;                      // sampler: buffer exhausted
+    fn reset(&mut self, cfg: &Self::Cfg);
+}
+```
+
+`VoiceBank<S: Source>` owns everything shared: the voice pool, allocation and stealing
+(retrigger same-note voices first, otherwise steal the least-recently-used), the ADSR, the
+per-voice filter, the LFO, and the parameter set. The two sources are small:
+
+- `OscBank` — per-voice oscillator *phases* only. The oscillator configs live in the
+  bank's shared `Cfg`, read at render time.
+- `SamplePlayhead` — a fractional position and rate into an `Arc<SampleData>`. Pitched
+  mode derives the rate from the note's distance to the root (`2^(semis/12)`, times the
+  file/engine sample-rate ratio); kit mode looks the note up in a per-note sample map.
+  Playback is linearly interpolated; when the buffer runs out, `finished()` flips and the
+  bank releases the envelope automatically.
+
+The associated `Cfg` type is the important design decision: **voices read shared state,
+they don't own copies.** A hot-reload that changes an oscillator level writes one field in
+the bank's `Cfg` and every sounding voice hears it on its next sample — there is no "walk
+all voices and update their copies" code to get wrong, and no stale-copy bugs.
+
+The track-facing wrapper is a two-variant enum (`Instrument::Synth(VoiceBank<OscBank>)` /
+`Sampler(VoiceBank<SamplePlayhead>)`) that forwards a handful of methods. It stays small
+precisely because everything interesting lives in the generic bank.
+
+Retrigger modes (`Hard` / `Soft` / `Legato`) are decided by the envelope: `Hard` resets
+envelope, phase, and filter (percussive, clicks by design); `Soft` restarts the attack
+from the current level with phase and filter untouched (no discontinuity — the default);
+`Legato` doesn't retrigger at all while the note-on phase is still running, just re-pitches
+— the classic mono-synth feel.
+
+## 7. Parameters and automation
+
+Every knob in the API accepts either a number or a closure:
+
+```rust
+t.cutoff(800.0);
+t.cutoff(|c: Clock| 1000.0 + 300.0 * (c.beat * 0.1).sin());
+```
+
+One method, both behaviors — resolved by the type system through `IntoVal`:
+
+```rust
+pub enum Val<T> { Fixed(T), Fn(Box<dyn FnMut(Clock) -> T + Send>) }
+
+impl IntoVal<f32> for f32 { ... }                                  // literal → Fixed
+impl<F: FnMut(Clock) -> f32 + Send + 'static> IntoVal<f32> for F { ... }  // closure → Fn
+```
+
+(The two impls don't overlap because `f32` doesn't implement `FnMut`.) A `Fixed` value
+lands in the diffable spec. An `Fn` is evaluated once at `Clock::ZERO` to seed the spec —
+so the diff still sees a sensible static value — and the closure is recorded as an
+automation.
+
+An automation is `(ParamId, Box<dyn FnMut(Clock) -> f32>)`. `ParamId` is one enum naming
+everything automatable on a track — envelope and filter params, per-oscillator level and
+detune, mixer gain and pan, any effect parameter (`Fx { index, slot }`), even effect
+enable. One representation covers the synth, the sampler, the mixer, and the fx chain;
+the same `IntoVal` sugar works inside effect builders
+(`d.feedback(|c: Clock| ...)`).
+
+**Control rate + smoothing.** Automation closures run once per 64-frame control period,
+not per sample — cheap enough that a handful of closures per track is free. That alone
+would produce 1.5 ms staircases on audible parameters, so the params that click get a
+one-pole smoother (`Smoothed`): the closure writes a *target*, and the audible value
+glides toward it per sample with an ~8 ms time constant. Cutoff and gains are smoothed;
+timbre params that only matter at trigger time (envelope times, resonance) apply directly.
+The same mechanism dezippers hot-reload edits — dragging a value in your editor and saving
+repeatedly sounds like turning a knob, not a zipper.
+
+## 8. DSP notes
+
+All of `dsp/` is engine-agnostic: plain structs processing samples, individually testable.
+
+- **Oscillators** — sine, triangle, saw, square, noise. Saw and square are band-limited
+  with **polyBLEP**: the naive waveform plus a two-sample polynomial correction spliced in
+  around each discontinuity, which cancels the aliasing that makes naive digital saws
+  harsh in exactly the register leads live in. It's ~15 lines and costs two branches per
+  sample. Noise is a xorshift32 PRNG per voice — no allocation, no global RNG lock.
+- **Filter** — the Cytomic/Andrew Simper **state-variable filter**: two integrator states,
+  coefficients derived per sample from cutoff and resonance via the tan-prewarp. Chosen
+  because it stays numerically stable under fast modulation (LFO + automation + smoothing
+  all drive cutoff), and one topology yields lowpass/highpass/bandpass/notch from the same
+  two states.
+- **Envelope** — linear ADSR with the retrigger behavior of §6. Release always ramps from
+  the level at note-off, so releasing mid-attack doesn't jump.
+- **Effects** — delay (tempo-synced via `.beats(0.5)` or free-running, with a ping-pong
+  mode), chorus (modulated delay line), distortion (five waveshaping modes with bias, tone,
+  and output gain), and a Freeverb-style reverb (eight damped comb filters into four
+  allpass diffusers per channel, the classic tunings scaled to the engine sample rate,
+  with a stereo-width control that cross-blends the wet channels). Each effect is a
+  per-frame stereo processor with numbered parameter slots for automation; its diffable
+  config and the mapping from config to DSP live in one place (`model/fx.rs`), so adding
+  an effect means writing its DSP and its config — nothing else.
+
+## 9. What runs on the audio thread
+
+The honest inventory. Per control block, the callback does: advance the transport,
+evaluate automation closures, collect scheduler events, run voices and effects, and mix —
+all against **preallocated** buffers (each track's mono scratch and event list, the
+engine's master and group buffers are allocated at creation and reused; steady-state
+rendering allocates nothing).
+
+Three things intentionally bend strict real-time rules, with eyes open:
+
+- **Commands arrive over `std::sync::mpsc`** and are applied (and their old state dropped)
+  at the top of the callback. Applying an edit can allocate and free — the deal is that
+  *edits* may cost a few microseconds; steady-state playback doesn't. For a single-user
+  live instrument pushing a handful of commands per save, this is inaudible in practice.
+- **Pattern closures run in the callback**, once per loop boundary. They're user code, so
+  they're wrapped in `catch_unwind` — a panic keeps the previous loop playing (§4). A
+  pathologically slow pattern closure could still overrun the buffer; that's the current
+  trade for regeneration that's exactly boundary-accurate.
+- **Automation closures run in the callback** at control rate. They should be arithmetic
+  on `Clock`; the `Clock` helpers exist so they can be one-liners.
+
+Sample loading never touches the audio thread: WAV files are decoded to mono `f32` on the
+control thread, cached, and shared as `Arc<SampleData>` — a kit re-using the same file
+across slots shares one buffer, and shipping a sample to the engine is a pointer copy.
+
+MIDI input (first available port, `midi` feature) is similarly thin: the midir callback
+translates note-on/off into commands routed to whichever track `s.midi(track)` armed —
+same channel, same quantization-free immediate path as everything else that's
+sound-speed.
+
+## 10. Offline render and testing
+
+Because the engine renders into a plain slice, running it without an audio device is
+trivial — and it's both a feature and the test strategy:
+
+```rust
+autosynth::render(120.0, scene, 16.0, "out.wav")?;   // 16 bars, same engine, no cpal
+```
+
+The scene function is evaluated once, commands drain on the first render call, and blocks
+are written straight to a WAV. Output is deterministic and sample-exact, which makes the
+interesting properties assertable in ordinary `cargo test`:
+
+- **Timing**: render N blocks, assert the exact sample position of every note-on and
+  note-off — including across tempo changes, loop wraps, and boundary-queued pattern
+  swaps. The beat-native transport's contract is pinned by these tests.
+- **Diffing**: build two `TrackSpec`s and assert what the differ sees — e.g. that an
+  fx-enable toggle is a visible, enable-only change (buffers preserved, no rebuild).
+- **DSP**: golden RMS/spectral checks on oscillators, filter, envelope, and effects as
+  pure functions.
+
+The result is a live instrument whose whole audible behavior — scheduling, hot-reload
+semantics, DSP — is exercised headlessly, byte-for-byte, in CI.
