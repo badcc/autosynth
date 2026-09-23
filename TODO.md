@@ -1,13 +1,8 @@
-- Adding new track does not seem to auto-restart 
-- Hotpatch sound immediately, but note only .every
-
-- Group some tracks and be able to apply fx to the whole group (including volume.)
-- A way to do more ARRANGEMENT-style things instead of just SESSION live-coding
-
-- Allow Osc Level to be IntoVal automated
-- What we WANT FROM A RESTART is for it to queue restarted track... not restart everything at beat 0
-
-## FUTURE:
-- Connect my MIDI keyboard!? Knobs?
-    - Don't have to have a "record" but would be nice to play with tunes .. some timing help.. idk
-- Rattatui to show the oscillators
+- TUI (ratatui): draw signals (they're data now — curves, LFOs, energy over the form),
+  voice activity, bus meters, and the song position against the form.
+- MIDI keyboard: record played notes into a phrase, with quantize/timing help.
+- Stereo voices: unison spread across the field; per-voice pan.
+- Audio-follower sidechain (envelope of a source's audio) next to the trigger duck.
+- A better reverb (FDN) alongside the Freeverb.
+- Generate patterns off the audio thread (look-ahead on the control thread) if pattern
+  closures ever get heavy.
