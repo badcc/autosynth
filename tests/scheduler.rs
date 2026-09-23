@@ -1,15 +1,10 @@
 //! Regression tests for the beat-native scheduler (design defects 1–2).
 
 use autosynth::engine::scheduler::{NoteEv, Scheduler};
-use autosynth::music::NoteSpec;
+use autosynth::music::phrase::Event;
 
-fn on(beat: f32, note: u8, dur: f32) -> NoteSpec {
-    NoteSpec {
-        beat,
-        note,
-        vel: 1.0,
-        dur,
-    }
+fn on(beat: f32, note: u8, dur: f32) -> Event {
+    Event::new(beat, note, 1.0, dur)
 }
 
 #[test]
