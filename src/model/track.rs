@@ -1,93 +1,125 @@
-use std::path::PathBuf;
+//! Tracks and buses as data, and the identities that name them.
 
-use crate::model::fx::FxSpec;
-use crate::model::param::{Automation, PatternFn};
-use crate::model::patch::PatchSpec;
-use crate::music::NoteSpec;
+use std::any::{TypeId, type_name};
 
-/// Where a track's sound comes from. Compared by value on hot-reload — a change
-/// here (different sample, different kit) forces a full rebuild of the track's
-/// voices.
-#[derive(Clone, Debug, PartialEq)]
-pub enum SourceSpec {
-    /// Subtractive synth using `PatchSpec::oscillators`.
-    Synth,
-    /// Pitched one-shot sample, `root` mapping the file's natural pitch.
-    Sample { path: PathBuf, root: u8 },
-    /// Drum kit: each MIDI note plays a different sample.
-    Kit { slots: Vec<(u8, PathBuf)> },
+use crate::model::chain::ChainSpec;
+use crate::model::instrument::InstrumentSpec;
+use crate::music::phrase::Phrase;
+use crate::music::pitch::Key;
+use crate::music::signal::Signal;
+
+macro_rules! fn_id {
+    ($(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+        pub struct $name {
+            ty: TypeId,
+            /// Full module path of the function: the engine key.
+            pub key: String,
+        }
+
+        impl $name {
+            pub fn of<F: 'static>() -> Self {
+                Self { ty: TypeId::of::<F>(), key: type_name::<F>().to_string() }
+            }
+
+            /// The function's own name, for display.
+            pub fn name(&self) -> &str {
+                self.key.rsplit("::").find(|s| !s.starts_with('{')).unwrap_or("?")
+            }
+        }
+    };
 }
 
-/// Swing: shift every note that lands on an *odd* multiple of `grid` late by
-/// `(amount - 0.5) * 2 * grid` beats. `amount == 0.5` is straight timing. A
-/// *timing* property — it rides the pattern/one-shot payloads, not the diff.
+fn_id! {
+    /// A track's identity: the type of its builder function. Every function
+    /// item has a unique type, so the function *is* the name — stable across
+    /// hot reloads, collision-proof across modules.
+    TrackId
+}
+
+fn_id! {
+    /// A bus's identity: the type of its builder function.
+    BusId
+}
+
+/// Where a track or bus sends its output.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum Route {
+    #[default]
+    Master,
+    Bus(BusId),
+}
+
+/// Trigger-based sidechain: every note-on of `source` dips this track's gain by
+/// `depth`, recovering over `release` beats.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DuckSpec {
+    pub source: TrackId,
+    pub depth: f32,
+    pub release: f32,
+}
+
+/// Swing: notes on odd multiples of `grid` land late by `(amount - 0.5) * 2 *
+/// grid` beats. `0.5` is straight.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Swing {
     pub grid: f32,
     pub amount: f32,
 }
 
-/// The complete, diffable description of one track for a single frame.
-///
-/// The diffable fields (`source`, `patch`, `gain`, `pan`, `mute`, `fx`,
-/// `polyphony`, `loop_len`) drive hot-reload decisions. The closure/data fields
-/// (`pattern`, `one_shot`, `automations`, `swing`) can't be value-compared (or
-/// are timing-scoped), so they are resent whenever the builder re-runs.
+/// A looping pattern closure, re-run every loop.
+pub type PatternFn = Box<dyn FnMut(&mut Phrase) + Send>;
+
+pub struct Playback {
+    pub len: f32,
+    pub pattern: PatternFn,
+}
+
+/// The complete description of one track for one frame.
 pub struct TrackSpec {
-    pub source: SourceSpec,
-    pub patch: PatchSpec,
-    pub gain: f32,
-    pub pan: f32,
+    pub instrument: InstrumentSpec,
+    pub gain: Signal,
+    pub pan: Signal,
     pub mute: bool,
-    pub fx: Vec<FxSpec>,
-    pub polyphony: usize,
-    pub loop_len: Option<f32>,
-    pub pattern: Option<PatternFn>,
-    pub one_shot: Vec<NoteSpec>,
-    pub automations: Vec<Automation>,
+    pub chain: ChainSpec,
+    pub route: Route,
+    pub duck: Option<DuckSpec>,
+    /// Overrides the scene key for this track's patterns.
+    pub key: Option<Key>,
     pub swing: Option<Swing>,
+    pub playback: Option<Playback>,
 }
 
 impl Default for TrackSpec {
     fn default() -> Self {
         Self {
-            source: SourceSpec::Synth,
-            patch: PatchSpec::default(),
-            gain: 1.0,
-            pan: 0.0,
+            instrument: InstrumentSpec::default(),
+            gain: Signal::constant(1.0),
+            pan: Signal::constant(0.0),
             mute: false,
-            fx: Vec::new(),
-            polyphony: 8,
-            loop_len: None,
-            pattern: None,
-            one_shot: Vec::new(),
-            automations: Vec::new(),
+            chain: ChainSpec::default(),
+            route: Route::Master,
+            duck: None,
+            key: None,
             swing: None,
+            playback: None,
         }
     }
 }
 
-impl TrackSpec {
-    /// Whether the diffable *sound* fields (everything but timing) changed.
-    pub fn sound_differs(&self, other: &TrackSpec) -> bool {
-        self.patch != other.patch
-            || self.gain != other.gain
-            || self.pan != other.pan
-            || self.mute != other.mute
-    }
+/// A bus: tracks (and other buses) route or send into it; it has its own gain,
+/// chain, and route.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BusSpec {
+    pub gain: Signal,
+    pub mute: bool,
+    pub chain: ChainSpec,
+    pub route: Route,
+}
 
-    /// Whether the fx chain configuration changed (kind/params/enabled).
-    pub fn fx_differs(&self, other: &TrackSpec) -> bool {
-        self.fx != other.fx
-    }
-
-    /// Whether the source type changed (requires rebuilding voices).
-    pub fn source_differs(&self, other: &TrackSpec) -> bool {
-        self.source != other.source || self.polyphony != other.polyphony
-    }
-
-    /// Whether the loop length changed (a timing change).
-    pub fn loop_differs(&self, other: &TrackSpec) -> bool {
-        self.loop_len != other.loop_len
+impl Default for BusSpec {
+    fn default() -> Self {
+        Self { gain: Signal::constant(1.0), mute: false, chain: ChainSpec::default(), route: Route::Master }
     }
 }
