@@ -31,9 +31,32 @@ impl DurExt for f32 {
     }
 }
 
-/// Convert bars to beats (4/4).
-pub const fn bars(n: f32) -> f32 {
-    n * 4.0
+/// A bar count: integers (`bars(2)`) or fractions (`bars(0.5)`).
+pub trait BarCount {
+    fn to_f32(self) -> f32;
+}
+
+impl BarCount for i32 {
+    fn to_f32(self) -> f32 {
+        self as f32
+    }
+}
+
+impl BarCount for u32 {
+    fn to_f32(self) -> f32 {
+        self as f32
+    }
+}
+
+impl BarCount for f32 {
+    fn to_f32(self) -> f32 {
+        self
+    }
+}
+
+/// Convert bars to beats (4/4): `bars(2)` is 8 beats.
+pub fn bars(n: impl BarCount) -> f32 {
+    n.to_f32() * 4.0
 }
 
 #[cfg(test)]
@@ -56,5 +79,6 @@ mod tests {
         assert_eq!(N8.dotted(), 0.75);
         assert!((N4.triplet() - 2.0 / 3.0).abs() < 1e-6);
         assert_eq!(bars(2.0), 8.0);
+        assert_eq!(bars(2), 8.0);
     }
 }
