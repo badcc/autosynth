@@ -1,26 +1,35 @@
-use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 
 use crate::dsp::StereoFrame;
-use crate::engine::command::{BuiltSource, Command, EngineHandle, GroupBuild, Playback, TrackBuild};
-use crate::engine::mixer::{Bus, soft_limit};
-use crate::engine::track::Track;
-use crate::engine::transport::Transport;
+use crate::dsp::effects::FxCtx;
 use crate::engine::CONTROL_BLOCK;
+use crate::engine::bus::{Bus, BusChain};
+use crate::engine::chain::FxChain;
+use crate::engine::command::{Command, EngineHandle};
+use crate::engine::mixer::soft_limit;
+use crate::engine::track::{BlockCtx, Track};
+use crate::engine::transport::Transport;
+use crate::music::harmony::MAJOR;
+use crate::music::notes::C4;
+use crate::music::pitch::Key;
 
-/// The real-time engine. Renders block-by-block into any output slice — cpal in
-/// the live app, a plain buffer for offline render and tests.
+/// The real-time engine. Renders into any interleaved slice — cpal in the live
+/// app, a plain buffer for offline render and tests.
 pub struct Engine {
     rx: mpsc::Receiver<Command>,
-    tracks: HashMap<String, Track>,
-    groups: Vec<Bus>,
-    grouped: HashSet<String>,
+    /// Kept in insertion order so mixing (and so rendering) is deterministic.
+    tracks: Vec<Track>,
+    /// In processing order: every bus precedes the buses it feeds.
+    buses: Vec<Bus>,
+    master: FxChain,
     transport: Transport,
     channels: usize,
     sample_rate: f32,
+    key: Key,
+    knobs: [f32; 128],
     midi_track: Option<String>,
-    master: Vec<StereoFrame>,
-    group_buf: Vec<StereoFrame>,
+    master_buf: Vec<StereoFrame>,
+    scratch: Vec<usize>,
 }
 
 impl Engine {
@@ -28,25 +37,27 @@ impl Engine {
         let (tx, rx) = mpsc::channel();
         let engine = Self {
             rx,
-            tracks: HashMap::new(),
-            groups: Vec::new(),
-            grouped: HashSet::new(),
+            tracks: Vec::new(),
+            buses: Vec::new(),
+            master: FxChain::default(),
             transport: Transport::new(bpm, sample_rate),
             channels,
             sample_rate,
+            key: Key::new(C4, MAJOR),
+            knobs: [0.0; 128],
             midi_track: None,
-            master: vec![[0.0; 2]; CONTROL_BLOCK],
-            group_buf: vec![[0.0; 2]; CONTROL_BLOCK],
+            master_buf: vec![[0.0; 2]; CONTROL_BLOCK],
+            scratch: Vec::with_capacity(64),
         };
         (engine, EngineHandle::new(tx))
     }
 
+    pub fn transport(&self) -> &Transport {
+        &self.transport
+    }
+
     /// Build a cpal output stream, moving the engine into the audio callback.
-    pub fn build_stream(
-        self,
-        device: &cpal::Device,
-        config: &cpal::StreamConfig,
-    ) -> Result<cpal::Stream, cpal::BuildStreamError> {
+    pub fn build_stream(self, device: &cpal::Device, config: &cpal::StreamConfig) -> Result<cpal::Stream, cpal::BuildStreamError> {
         use cpal::traits::DeviceTrait;
         let mut engine = self;
         device.build_output_stream(
@@ -62,230 +73,195 @@ impl Engine {
         while let Ok(cmd) = self.rx.try_recv() {
             self.apply(cmd);
         }
-
         let frames = output.len() / self.channels;
         let mut done = 0;
         while done < frames {
-            let c = (frames - done).min(CONTROL_BLOCK);
-            let start = done * self.channels;
-            let end = (done + c) * self.channels;
-            self.render_chunk(&mut output[start..end], c);
-            done += c;
+            let n = (frames - done).min(CONTROL_BLOCK);
+            let (a, b) = (done * self.channels, (done + n) * self.channels);
+            self.render_block(&mut output[a..b], n);
+            done += n;
         }
     }
 
-    fn render_chunk(&mut self, out: &mut [f32], c: usize) {
+    fn render_block(&mut self, out: &mut [f32], n: usize) {
+        self.transport.update();
         let b0 = self.transport.beat;
-        let b1 = self.transport.beat_at(c);
         let bps = self.transport.beats_per_sample();
-        let sr = self.sample_rate;
+        let ctx = BlockCtx {
+            b0,
+            b1: self.transport.beat_at(n),
+            bps,
+            transport: &self.transport,
+            knobs: &self.knobs,
+            key: self.key,
+            fx: FxCtx {
+                sample_rate: self.sample_rate,
+                bpm: self.transport.bpm as f32,
+                beat: self.transport.song(b0),
+                beats_per_sample: bps,
+            },
+        };
 
-        for f in &mut self.master[..c] {
-            *f = [0.0; 2];
+        self.master_buf[..n].fill([0.0; 2]);
+        for bus in &mut self.buses {
+            bus.input[..n].fill([0.0; 2]);
         }
 
-        // Grouped tracks: render into the group buffer, run the bus, sum in.
-        let mut groups = std::mem::take(&mut self.groups);
-        for bus in &mut groups {
-            for f in &mut self.group_buf[..c] {
-                *f = [0.0; 2];
-            }
-            for member in &bus.members {
-                if let Some(t) = self.tracks.get_mut(member) {
-                    t.render_add(&mut self.group_buf[..c], b0, b1, bps);
-                }
-            }
-            bus.process(&mut self.group_buf[..c], sr);
-            for i in 0..c {
-                self.master[i][0] += self.group_buf[i][0];
-                self.master[i][1] += self.group_buf[i][1];
-            }
-        }
-        self.groups = groups;
-
-        // Ungrouped tracks go straight to master.
-        for (name, t) in &mut self.tracks {
-            if !self.grouped.contains(name) {
-                t.render_add(&mut self.master[..c], b0, b1, bps);
-            }
+        // 1. Signals, pattern regeneration, event collection.
+        for t in &mut self.tracks {
+            t.prepare(&ctx, n);
         }
 
-        // Master soft limiter → interleaved output.
-        for (i, frame) in self.master[..c].iter().enumerate() {
-            let l = soft_limit(frame[0]);
-            let r = soft_limit(frame[1]);
-            let off = i * self.channels;
+        // 2. Sidechain: forward each source's note-on offsets to its duckers.
+        for i in 0..self.tracks.len() {
+            let Some(src) = self.tracks[i].duck_source() else {
+                continue;
+            };
+            self.scratch.clear();
+            if let Some(s) = self.tracks.iter().find(|t| t.name == src) {
+                self.scratch.extend_from_slice(s.onsets());
+            }
+            self.tracks[i].set_duck_triggers(&self.scratch);
+        }
+
+        // 3. Tracks → their route (a bus input, or master).
+        for t in &mut self.tracks {
+            t.render(&ctx, n, &mut self.buses);
+            let dest = match &t.route {
+                Some(bus) => self.buses.iter_mut().find(|b| &b.name == bus).map(|b| &mut b.input[..n]),
+                None => None,
+            };
+            add(dest.unwrap_or(&mut self.master_buf[..n]), t.out(n));
+        }
+
+        // 4. Buses in order; each may feed only buses after it.
+        for i in 0..self.buses.len() {
+            let (head, later) = self.buses.split_at_mut(i + 1);
+            let bus = &mut head[i];
+            bus.process(n, &ctx.fx, &self.knobs, later);
+            let dest = match &bus.route {
+                Some(r) => later.iter_mut().find(|b| &b.name == r).map(|b| &mut b.input[..n]),
+                None => None,
+            };
+            add(dest.unwrap_or(&mut self.master_buf[..n]), &bus.input[..n]);
+        }
+
+        // 5. Master chain, then the safety soft-limiter.
+        let no_buses: &mut [Bus] = &mut [];
+        self.master.process(&mut self.master_buf[..n], &ctx.fx, &self.knobs, no_buses);
+        for (i, frame) in self.master_buf[..n].iter().enumerate() {
+            let (l, r) = (soft_limit(frame[0]), soft_limit(frame[1]));
+            let o = i * self.channels;
             match self.channels {
-                1 => out[off] = (l + r) * 0.5,
+                1 => out[o] = (l + r) * 0.5,
                 _ => {
-                    out[off] = l;
-                    out[off + 1] = r;
-                    for ch in 2..self.channels {
-                        out[off + ch] = 0.0;
-                    }
+                    out[o] = l;
+                    out[o + 1] = r;
+                    out[o + 2..o + self.channels].fill(0.0);
                 }
             }
         }
 
-        self.transport.advance(c);
+        self.transport.advance(n);
     }
 
-    /// The beat a newly launched track should start on — quantized to the next
-    /// bar so added/changed tracks lock to the grid instead of starting wherever
-    /// the buffer happened to be.
-    fn quantized_start(&self) -> f64 {
-        let beat = self.transport.beat;
-        if beat <= 0.0 {
-            0.0
-        } else {
-            (beat / 4.0).ceil() * 4.0
-        }
-    }
-
-    fn rebuild_grouped(&mut self) {
-        self.grouped.clear();
-        for bus in &self.groups {
-            for m in &bus.members {
-                self.grouped.insert(m.clone());
-            }
-        }
+    fn track(&mut self, name: &str) -> Option<&mut Track> {
+        self.tracks.iter_mut().find(|t| t.name == name)
     }
 
     fn apply(&mut self, cmd: Command) {
         match cmd {
-            Command::AddTrack { name, build } => {
-                let now = self.quantized_start();
-                let track = self.build_track(*build, now);
-                self.tracks.insert(name, track);
-            }
-            Command::RemoveTrack(name) => {
-                self.tracks.remove(&name);
-            }
-            Command::StopTrack(name) => {
-                if let Some(t) = self.tracks.get_mut(&name) {
-                    t.stop();
+            Command::AddTrack(build) => {
+                // New tracks launch on the next bar line.
+                let now = self.transport.next_bar();
+                let t = Track::new(*build, now, &self.transport, &self.knobs, self.key, self.sample_rate);
+                match self.tracks.iter_mut().find(|x| x.name == t.name) {
+                    Some(slot) => *slot = t,
+                    None => self.tracks.push(t),
                 }
             }
-            Command::SetPatch { track, patch } => {
-                if let Some(t) = self.tracks.get_mut(&track) {
-                    t.apply_patch(&patch);
+            Command::RemoveTrack(name) => self.tracks.retain(|t| t.name != name),
+            Command::SetInstrument { track, cfg } => {
+                if let Some(t) = self.track(&track) {
+                    t.set_instrument(*cfg);
                 }
             }
-            Command::SetMixer {
-                track,
-                gain,
-                pan,
-                mute,
-            } => {
-                if let Some(t) = self.tracks.get_mut(&track) {
+            Command::SetMixer { track, gain, pan, mute } => {
+                if let Some(t) = self.track(&track) {
                     t.set_mixer(gain, pan, mute);
                 }
             }
-            Command::SetFx { track, fx, enabled } => {
-                if let Some(t) = self.tracks.get_mut(&track) {
-                    t.set_fx(fx, enabled);
+            Command::SetChain { track, updates } => {
+                if let Some(t) = self.track(&track) {
+                    t.set_chain(updates);
                 }
             }
-            Command::SetFxEnabled { track, enabled } => {
-                if let Some(t) = self.tracks.get_mut(&track) {
-                    t.set_fx_enabled(enabled);
+            Command::SetRoute { track, route } => {
+                if let Some(t) = self.track(&track) {
+                    t.route = route;
                 }
             }
-            Command::SetAutomations { track, automations } => {
-                if let Some(t) = self.tracks.get_mut(&track) {
-                    t.set_automations(automations);
+            Command::SetDuck { track, duck } => {
+                if let Some(t) = self.track(&track) {
+                    t.set_duck(duck);
                 }
             }
-            Command::QueuePattern {
-                track,
-                func,
-                loop_len,
-                swing,
-            } => {
-                if let Some(t) = self.tracks.get_mut(&track) {
-                    t.queue_pattern(func, loop_len, swing);
+            Command::SetTrackKey { track, key } => {
+                if let Some(t) = self.track(&track) {
+                    t.set_key(key);
                 }
             }
-            Command::QueueOneShot { track, notes, swing } => {
-                if let Some(t) = self.tracks.get_mut(&track) {
-                    t.queue_oneshot(notes, swing);
+            Command::QueuePattern { track, pattern } => {
+                if let Some(t) = self.track(&track) {
+                    t.queue_pattern(pattern);
                 }
             }
-            Command::SetGroups(groups) => {
-                self.groups = groups
-                    .into_iter()
-                    .map(|g| {
-                        let GroupBuild {
-                            members,
-                            gain,
-                            fx,
-                            fx_enabled,
-                        } = g;
-                        let mut bus = Bus::new(gain, self.sample_rate, members);
-                        bus.fx = fx;
-                        bus.fx_enabled = fx_enabled;
-                        bus
-                    })
-                    .collect();
-                self.rebuild_grouped();
+            Command::SetBuses(updates) => {
+                let mut old = std::mem::take(&mut self.buses);
+                for u in updates {
+                    let existing = old.iter().position(|b| b.name == u.name).map(|i| old.swap_remove(i));
+                    let bus = match (existing, u.chain) {
+                        (Some(mut b), chain) => {
+                            b.update(crate::engine::bus::BusUpdate { chain, ..u });
+                            b
+                        }
+                        (None, BusChain::New(c)) => Bus::new(crate::engine::bus::BusUpdate { chain: BusChain::Update(Vec::new()), ..u }, c, self.sample_rate),
+                        (None, BusChain::Update(_)) => {
+                            tracing::error!("bus `{}` out of sync with the scene", u.name);
+                            continue;
+                        }
+                    };
+                    self.buses.push(bus);
+                }
             }
+            Command::SetMaster(updates) => self.master.apply(updates),
+            Command::SetTempo(bpm) => self.transport.bpm = bpm as f64,
+            Command::SetKey(key) => self.key = key,
+            Command::Jump(beat) => self.transport.jump(beat),
+            Command::Hold(span) => self.transport.hold(span),
             Command::MidiNoteOn { note, vel } => {
-                if let Some(name) = &self.midi_track
-                    && let Some(t) = self.tracks.get_mut(name)
+                if let Some(name) = self.midi_track.clone()
+                    && let Some(t) = self.track(&name)
                 {
                     t.note_on(note, vel);
                 }
             }
             Command::MidiNoteOff { note } => {
-                if let Some(name) = &self.midi_track
-                    && let Some(t) = self.tracks.get_mut(name)
+                if let Some(name) = self.midi_track.clone()
+                    && let Some(t) = self.track(&name)
                 {
                     t.note_off(note);
                 }
             }
-            Command::SetMidiTrack(name) => {
-                self.midi_track = name;
-            }
-            Command::SetTempo(bpm) => {
-                self.transport.bpm = bpm as f64;
-            }
+            Command::MidiCc { cc, value } => self.knobs[(cc & 127) as usize] = value.clamp(0.0, 1.0),
+            Command::SetMidiTrack(name) => self.midi_track = name,
         }
     }
+}
 
-    fn build_track(&self, build: TrackBuild, now: f64) -> Track {
-        let TrackBuild {
-            source,
-            patch,
-            polyphony,
-            gain,
-            pan,
-            mute,
-            fx,
-            fx_enabled,
-            automations,
-            playback,
-            seed,
-        } = build;
-
-        let mut track = match source {
-            BuiltSource::Synth => {
-                Track::new_synth(self.sample_rate, polyphony, &patch, gain, pan)
-            }
-            BuiltSource::Sample(s) => {
-                Track::new_sampler(self.sample_rate, polyphony, &patch, gain, pan, s)
-            }
-        };
-        track.mute = mute;
-        track.set_seed(seed);
-        track.set_fx(fx, fx_enabled);
-        track.set_automations(automations);
-        match playback {
-            Playback::Pattern { func, loop_len, swing } => {
-                track.launch_pattern(func, loop_len, now, swing)
-            }
-            Playback::OneShot { notes, swing } => track.launch_oneshot(notes, now, swing),
-            Playback::Silent => {}
-        }
-        track
+fn add(dest: &mut [StereoFrame], src: &[StereoFrame]) {
+    for (d, s) in dest.iter_mut().zip(src) {
+        d[0] += s[0];
+        d[1] += s[1];
     }
 }

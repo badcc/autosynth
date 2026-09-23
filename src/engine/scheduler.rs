@@ -1,9 +1,9 @@
-use crate::music::{Clock, NoteSpec};
+use crate::music::phrase::{Event, Locks};
 
 /// A note event resolved to a global beat position.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NoteEv {
-    On { note: u8, vel: f32 },
+    On { note: u8, vel: f32, slide: bool, locks: Locks },
     Off { note: u8 },
 }
 
@@ -19,7 +19,7 @@ pub struct Fired {
 /// old `all_notes_off` behaviour: it is set only when the *pattern was replaced*
 /// (a real edit), never as a leak-plugging default.
 pub struct Queued {
-    pub ons: Vec<NoteSpec>,
+    pub ons: Vec<Event>,
     pub loop_len: Option<f64>,
     pub choke: bool,
 }
@@ -32,12 +32,10 @@ pub struct Queued {
 /// dropped (the old bug). One-shot (non-looping) tracks simply play the list
 /// once.
 pub struct Scheduler {
-    ons: Vec<NoteSpec>,
+    ons: Vec<Event>,
     loop_len: Option<f64>,
     /// Global beat of the current iteration's loop-local zero.
     iter_base: f64,
-    /// Global beat at first launch (stable reference for `Clock`).
-    launch_beat: f64,
     cursor: usize,
     iteration: u32,
     active: bool,
@@ -52,7 +50,6 @@ impl Scheduler {
             ons: Vec::new(),
             loop_len: None,
             iter_base: 0.0,
-            launch_beat: 0.0,
             cursor: 0,
             iteration: 0,
             active: false,
@@ -79,12 +76,11 @@ impl Scheduler {
 
     /// Start (or restart) playback at global beat `now`. Sorted note-ons and an
     /// optional loop length define the pattern. Clears any prior state.
-    pub fn launch(&mut self, mut ons: Vec<NoteSpec>, loop_len: Option<f64>, now: f64) {
-        ons.sort_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal));
+    pub fn launch(&mut self, mut ons: Vec<Event>, loop_len: Option<f64>, now: f64) {
+        ons.sort_by(|a, b| a.beat.total_cmp(&b.beat));
         self.ons = ons;
         self.loop_len = loop_len.filter(|l| *l > 0.0);
         self.iter_base = now;
-        self.launch_beat = now;
         self.cursor = 0;
         self.iteration = 0;
         self.active = true;
@@ -94,7 +90,7 @@ impl Scheduler {
 
     /// Queue a pattern/loop swap for the next loop boundary. Non-looping tracks
     /// apply it immediately from `now`.
-    pub fn queue(&mut self, ons: Vec<NoteSpec>, loop_len: Option<f64>, choke: bool, now: f64) {
+    pub fn queue(&mut self, ons: Vec<Event>, loop_len: Option<f64>, choke: bool, now: f64) {
         if self.is_looping() {
             self.queued = Some(Queued {
                 ons,
@@ -109,27 +105,6 @@ impl Scheduler {
 
     pub fn stop(&mut self) {
         self.active = false;
-    }
-
-    /// The `Clock` for a given global beat, using the loop length in effect.
-    pub fn clock_at(&self, global: f64) -> Clock {
-        match self.loop_len {
-            Some(l) if l > 0.0 => {
-                let d = (global - self.launch_beat).max(0.0);
-                let it = (d / l).floor();
-                let local = d - it * l;
-                Clock {
-                    beat: global as f32,
-                    local: local as f32,
-                    iteration: it as u32,
-                }
-            }
-            _ => Clock {
-                beat: global as f32,
-                local: (global - self.launch_beat).max(0.0) as f32,
-                iteration: 0,
-            },
-        }
     }
 
     /// The global beat of the next loop boundary, if looping. The track uses
@@ -201,13 +176,15 @@ impl Scheduler {
                 ev: NoteEv::On {
                     note: spec.note,
                     vel: spec.vel,
+                    slide: spec.slide,
+                    locks: spec.locks,
                 },
             });
             self.pending_offs.push((g + spec.dur as f64, spec.note));
             self.cursor += 1;
         }
 
-        out.sort_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal));
+        out.sort_by(|a, b| a.beat.total_cmp(&b.beat));
     }
 
     /// Advance to the next loop iteration at `boundary`, applying any queued
@@ -229,12 +206,11 @@ impl Scheduler {
             }
             self.ons = q.ons;
             self.ons
-                .sort_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal));
-            // Only re-anchor the Clock reference when the loop length actually
-            // changes — a plain regeneration keeps the iteration count climbing.
+                .sort_by(|a, b| a.beat.total_cmp(&b.beat));
+            // Only a loop-length change restarts the iteration count — a plain
+            // regeneration keeps it climbing.
             if q.loop_len != self.loop_len {
                 self.loop_len = q.loop_len;
-                self.launch_beat = boundary;
                 self.iteration = 0;
             }
         }
