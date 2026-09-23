@@ -1,18 +1,13 @@
-//! The scene runtime: the builder surface, hot-reload diffing, sample cache,
-//! offline render, cpal setup, and MIDI. This is the only layer the user's
-//! `scene` and track functions touch.
+//! The scene runtime: builders, hot-reload diffing, sample cache, offline
+//! render, cpal setup and MIDI. This is the only layer your `scene`, track, bus
+//! and chain functions touch.
 
-pub mod fx_builder;
+pub mod chain_builder;
 pub mod render;
 pub mod scene;
+pub mod track_builder;
 
 #[cfg(feature = "hot-reload")]
-mod app;
+pub mod app;
 #[cfg(feature = "midi")]
 pub(crate) mod midi;
-
-pub use render::render;
-pub use scene::{GroupBuilder, OscBuilder, Scene, SceneTrack};
-
-#[cfg(feature = "hot-reload")]
-pub use app::live;

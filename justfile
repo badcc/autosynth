@@ -9,3 +9,7 @@ default:
 live example="into_jfk":
     {{dx}} serve --example {{example}} --hotpatch
 
+
+# Bounce an example to a WAV offline (no audio device)
+render example="progressive" bars="16":
+    cargo run --release --example {{example}} -- --render {{bars}} {{example}}.wav

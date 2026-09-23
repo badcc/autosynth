@@ -22,6 +22,14 @@ required-features = ["hot-reload"]
 name = "into_jfk"
 required-features = ["hot-reload"]
 
+[[example]]
+name = "progressive"
+required-features = ["hot-reload"]
+
+[[example]]
+name = "acid"
+required-features = ["hot-reload"]
+
 [dependencies]
 anyhow = "1.0"
 cpal = "0.15"

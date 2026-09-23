@@ -1,37 +1,31 @@
 //! One `use autosynth::prelude::*;` brings in the whole live-coding surface.
 
-// ── Scene API (primary) ──
-pub use crate::live::{GroupBuilder, OscBuilder, Scene, SceneTrack as Track};
-pub use crate::live::render;
-#[cfg(feature = "hot-reload")]
-pub use crate::live::live;
+// ── Scene, builders ──
+pub use crate::live::chain_builder::Chain;
+pub use crate::live::scene::Scene;
+pub use crate::live::track_builder::{Bus, Track};
+pub use crate::model::chain::CustomEffect;
+pub use crate::model::instrument::{Sampler, Synth};
 
-// ── Timing / automation ──
-pub use crate::model::param::IntoVal;
-pub use crate::music::{Clock, Phrase};
+// ── Libraries ──
+pub use crate::{chains, presets};
 
-// ── Composition enums used in builder calls. The glob imports let you write
-// `t.osc(Saw, 0.5)`, `t.filter(Notch)`, `t.retrigger(Legato)`. ──
-pub use crate::dsp::effects::{DelayMode, DistortionMode};
-pub use crate::dsp::envelope::RetriggerMode;
-pub use crate::dsp::envelope::RetriggerMode::*;
-pub use crate::dsp::filter::FilterType;
-pub use crate::dsp::filter::FilterType::*;
-pub use crate::dsp::oscillator::Oscillator;
-pub use crate::dsp::waveform::Waveform;
-pub use crate::dsp::waveform::Waveform::*;
-
-// ── Durations: `N4`, `N8`, … and the `.dotted()`/`.triplet()` modifiers ──
-pub use crate::music::duration::{DurExt, N1, N2, N4, N8, N16, N32, bars};
-
-// ── Automation shapes ──
-pub use crate::music::shape::{Shape, ramp, saw, sine, tri};
+// ── Signals and form ──
+pub use crate::music::form::Section;
+pub use crate::music::signal::{
+    Ctx, Mod, Signal, adsr, after, curve, during, env, key, knob, lfo, noise, rnd, saw, sine, smooth_noise, square,
+    tri, vel,
+};
 
 // ── Patterns ──
-pub use crate::music::pattern::{Pattern, arp, euclidean};
+pub use crate::music::phrase::{Arp, Phrase};
 
-// ── Harmony: `Key`, scales, chords, and the chord/scale functions ──
+// ── Enums used in builder calls: `Saw`, `Hard`, `Arp::UpDown` ──
+pub use crate::dsp::envelope::RetriggerMode::{self, *};
+pub use crate::dsp::waveform::Waveform::{self, *};
+
+// ── Durations, harmony, notes ──
+pub use crate::music::duration::{DurExt, N1, N2, N4, N8, N16, N32, bars};
 pub use crate::music::harmony::*;
-
-// ── Note constants and `note("C#4")` ──
 pub use crate::music::notes::*;
+pub use crate::music::pitch::Key;
