@@ -1,6 +1,17 @@
 use crate::dsp::StereoFrame;
-use crate::dsp::effects::Effect;
-use crate::model::fx::reverb_slots::{PARAM_DAMP, PARAM_MIX, PARAM_SIZE, PARAM_WIDTH};
+use crate::dsp::effects::{Effect, FxCtx, ParamDef, mix};
+
+pub const SIZE: usize = 0;
+pub const DAMP: usize = 1;
+pub const MIX: usize = 2;
+pub const WIDTH: usize = 3;
+
+pub const PARAMS: &[ParamDef] = &[
+    ParamDef { name: "size", default: 0.5 },
+    ParamDef { name: "damp", default: 0.5 },
+    ParamDef { name: "mix", default: 0.3 },
+    ParamDef { name: "width", default: 1.0 },
+];
 
 // Freeverb tunings, in samples at 44.1 kHz. Scaled to the actual rate.
 const COMB_TUNINGS: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
@@ -90,7 +101,7 @@ pub struct Reverb {
 }
 
 impl Reverb {
-    pub fn new(size: f32, damp: f32, mix: f32, width: f32, sample_rate: f32) -> Self {
+    pub fn new(sample_rate: f32) -> Self {
         let scale = sample_rate / 44100.0;
         let s = |n: usize| ((n as f32) * scale) as usize;
         let mut rv = Self {
@@ -106,11 +117,11 @@ impl Reverb {
                 .collect(),
             size: 0.0,
             damp: 0.0,
-            mix: mix.clamp(0.0, 1.0),
-            width: width.clamp(0.0, 1.0),
+            mix: PARAMS[MIX].default,
+            width: PARAMS[WIDTH].default,
         };
-        rv.set_size(size);
-        rv.set_damp(damp);
+        rv.set_size(PARAMS[SIZE].default);
+        rv.set_damp(PARAMS[DAMP].default);
         rv
     }
 
@@ -131,8 +142,9 @@ impl Reverb {
     }
 }
 
-impl Effect for Reverb {
-    fn process(&mut self, frame: StereoFrame, _sample_rate: f32) -> StereoFrame {
+impl Reverb {
+    #[inline]
+    fn frame(&mut self, frame: StereoFrame) -> StereoFrame {
         let input = (frame[0] + frame[1]) * FIXED_GAIN;
 
         let mut out_l = 0.0;
@@ -156,10 +168,25 @@ impl Effect for Reverb {
         let wet_l = out_l * wet1 + out_r * wet2;
         let wet_r = out_r * wet1 + out_l * wet2;
 
-        [
-            frame[0] * (1.0 - self.mix) + wet_l * self.mix,
-            frame[1] * (1.0 - self.mix) + wet_r * self.mix,
-        ]
+        [mix(frame[0], wet_l, self.mix), mix(frame[1], wet_r, self.mix)]
+    }
+}
+
+impl Effect for Reverb {
+    fn process(&mut self, buf: &mut [StereoFrame], _ctx: &FxCtx) {
+        for frame in buf.iter_mut() {
+            *frame = self.frame(*frame);
+        }
+    }
+
+    fn set(&mut self, slot: usize, v: f32) {
+        match slot {
+            SIZE => self.set_size(v),
+            DAMP => self.set_damp(v),
+            MIX => self.mix = v.clamp(0.0, 1.0),
+            WIDTH => self.width = v.clamp(0.0, 1.0),
+            _ => {}
+        }
     }
 
     fn reset(&mut self) {
@@ -168,16 +195,6 @@ impl Effect for Reverb {
         }
         for a in self.allpass_l.iter_mut().chain(self.allpass_r.iter_mut()) {
             a.reset();
-        }
-    }
-
-    fn set_param(&mut self, slot: u8, value: f32) {
-        match slot {
-            PARAM_SIZE => self.set_size(value),
-            PARAM_DAMP => self.set_damp(value),
-            PARAM_MIX => self.mix = value.clamp(0.0, 1.0),
-            PARAM_WIDTH => self.width = value.clamp(0.0, 1.0),
-            _ => {}
         }
     }
 }
